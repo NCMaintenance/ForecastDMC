@@ -14,52 +14,52 @@ warnings.filterwarnings("ignore")
 st.set_page_config(layout="wide")
 st.title("📈 Hospital Forecasting with Prophet & LightGBM")
 
-# Sidebar
-uploaded = st.sidebar.file_uploader("Upload Excel file", type="xlsx")
+# 📂 Sidebar
+uploaded = st.sidebar.file_uploader("📤 Upload Excel file", type="xlsx")
 hospitals = []
-targets   = [
-    "Tracker8am","Tracker2pm","Tracker8pm",
+targets = [
+    "Tracker8am", "Tracker2pm", "Tracker8pm",
     "AdditionalCapacityOpen Morning"
 ]
 
 if not uploaded:
-    st.sidebar.info("Please upload your Excel file.")
+    st.sidebar.info("📄 Please upload your Excel file.")
     st.stop()
 
-# Load data
+# 📊 Load data
 df = pd.read_excel(uploaded)
 df['Date'] = pd.to_datetime(df['Date'])
 df = df.sort_values('Date')
 hospitals = sorted(df['Hospital'].unique())
 
-sel_hosp   = st.sidebar.selectbox("Hospital", ["All"]+hospitals)
-sel_target = st.sidebar.selectbox("Target",   ["All"]+targets)
+sel_hosp = st.sidebar.selectbox("🏥 Select Hospital", ["All"] + hospitals)
+sel_target = st.sidebar.selectbox("🎯 Select Target", ["All"] + targets)
 
-future_days = st.sidebar.slider("Forecast horizon (days ahead)", 7, 30, 14)
+future_days = st.sidebar.slider("🔮 Forecast horizon (days ahead)", 7, 30, 14)
 run = st.sidebar.button("🚀 Run Forecast")
 if not run:
-    st.sidebar.info("Configure then click Run Forecast")
+    st.sidebar.info("⚙️ Configure then click Run Forecast")
     st.stop()
 
-# Filters
-h_list = hospitals if sel_hosp=="All" else [sel_hosp]
-t_list = targets   if sel_target=="All" else [sel_target]
+# 🧹 Filters
+h_list = hospitals if sel_hosp == "All" else [sel_hosp]
+t_list = targets if sel_target == "All" else [sel_target]
 
 results = []
 
 for hosp in h_list:
     st.header(f"🏥 {hosp}")
-    df_h = df[df['Hospital']==hosp].reset_index(drop=True)
+    df_h = df[df['Hospital'] == hosp].reset_index(drop=True)
 
     for tgt in t_list:
         st.subheader(f"🎯 {tgt}")
         if df_h[tgt].isna().any():
-            st.warning("Skipping (nulls present)")
+            st.warning("⛔ Skipping due to null values")
             continue
 
-        df2 = df_h[['Date', tgt]].rename(columns={'Date':'ds', tgt:'y'})
-        df2['y_lag1']  = df2['y'].shift(1)
-        df2['y_lag2']  = df2['y'].shift(2)
+        df2 = df_h[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
+        df2['y_lag1'] = df2['y'].shift(1)
+        df2['y_lag2'] = df2['y'].shift(2)
         df2['y_diff1'] = df2['y'] - df2['y'].shift(1)
 
         df2['dow'] = df2['ds'].dt.weekday
@@ -154,14 +154,14 @@ for hosp in h_list:
         if np.isinf(mae_prophet):
             pred_test = l_test
             pred_fut = preds_lgb
-            method = "LGBM only"
+            method = "🤖 LGBM only"
         else:
             w_p = 1 / mae_prophet
             w_l = 1 / mae_lgb
             S = w_p + w_l
             pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_l * l_test) / S
             pred_fut = [(w_p * p + w_l * l) / S for p, l in zip(preds_prophet, preds_lgb)]
-            method = f"Hybrid (P:{w_p/S:.2f},L:{w_l/S:.2f})"
+            method = f"🔗 Hybrid (📈:{w_p/S:.2f},🤖:{w_l/S:.2f})"
 
         mae_test = mean_absolute_error(test['y'], pred_test)
 
@@ -169,25 +169,26 @@ for hosp in h_list:
         fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual'))
         fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines+markers', name='Pred (test)'))
         fig.add_trace(go.Scatter(x=fut_dates, y=pred_fut, mode='lines+markers', name='Forecast', line=dict(dash='dash')))
-        fig.update_layout(title=f"{hosp} • {tgt} | {method} | MAE: {mae_test:.2f}",
-                          xaxis_title="Date", yaxis_title=tgt, template="plotly_white")
+        fig.update_layout(title=f"{hosp} • {tgt} | {method} | 📉 MAE: {mae_test:.2f}",
+                          xaxis_title="📅 Date", yaxis_title=tgt, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("**Test‑set Results**")
+        st.markdown("**📉 Test‑set Results**")
         st.dataframe(pd.DataFrame({
-            "Date": test['ds'],
+            "📅 Date": test['ds'],
             "Actual": test['y'],
             "Predicted": pred_test,
             "Error": np.abs(test['y'] - pred_test)
         }).round(2), use_container_width=True)
 
-        st.markdown("**Future Forecast**")
+        st.markdown("**🔮 Future Forecast**")
         st.dataframe(pd.DataFrame({
-            "Date": fut_dates,
+            "📅 Date": fut_dates,
             "Forecast": pred_fut
         }).round(2), use_container_width=True)
 
-        results.append({"Hospital": hosp, "Target": tgt, "Method": method, "Test MAE": round(mae_test, 2)})
+        results.append({"Hospital": hosp, "Target": tgt, "Method": method, "📉 Test MAE": round(mae_test, 2)})
 
+# 📊 Summary
 st.subheader("📊 Summary")
 st.dataframe(pd.DataFrame(results), use_container_width=True)
