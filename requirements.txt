@@ -6,3 +6,4 @@ lightgbm
 scikit-learn
 prophet
 plotly
+optuna
