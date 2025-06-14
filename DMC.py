@@ -1,3 +1,4 @@
+# Hospital Forecasting with Prophet & LightGBM
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,6 +7,7 @@ from prophet.diagnostics import cross_validation, performance_metrics
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error
+from sklearn.inspection import permutation_importance
 import plotly.graph_objs as go
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -20,8 +22,7 @@ st.title("Hospital Forecasting with Prophet & LightGBM")
 uploaded = st.sidebar.file_uploader("Upload Excel file", type="xlsx")
 targets = [
     "Tracker8am", "Tracker2pm", "Tracker8pm",
-    "AdditionalCapacityOpen Morning", "TimeTotal_8am",
-    "TimeTotal_2pm", "TimeTotal_8pm"
+    "AdditionalCapacityOpen Morning", "TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"
 ]
 
 if not uploaded:
@@ -37,6 +38,7 @@ hospitals = sorted(df['Hospital'].unique())
 sel_hosp = st.sidebar.selectbox("Hospital", ["All"] + hospitals)
 sel_target = st.sidebar.selectbox("Target", ["All"] + targets)
 future_days = st.sidebar.slider("Forecast horizon (days ahead)", 7, 30, 14)
+auto_remove_neg = st.sidebar.checkbox("Auto-remove harmful features", value=True)
 run = st.sidebar.button("Run Forecast")
 
 if not run:
@@ -91,7 +93,6 @@ for hosp in h_list:
             split = int(0.8 * n)
             train = df2.iloc[:split].reset_index(drop=True)
             test = df2.iloc[split:].reset_index(drop=True)
-
             feats = [col for col in df2.columns if col not in ['ds', 'y']]
 
             X_tr, y_tr = train[feats], train['y']
@@ -105,6 +106,15 @@ for hosp in h_list:
 
             lgb_final = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31)
             lgb_final.fit(X_tr, y_tr)
+
+            # Check for harmful features
+            perm = permutation_importance(lgb_final, test[feats], test['y'], scoring='neg_mean_absolute_error', n_repeats=5, random_state=42)
+            perm_imp = pd.Series(perm.importances_mean, index=feats)
+            harmful_feats = perm_imp[perm_imp < 0].index.tolist()
+            if auto_remove_neg:
+                feats = [f for f in feats if f not in harmful_feats]
+                st.markdown(f"Removed {len(harmful_feats)} features with negative impact")
+
             l_test = lgb_final.predict(test[feats])
 
             m_full = Prophet(yearly_seasonality=True, weekly_seasonality=True, seasonality_mode='additive')
@@ -180,14 +190,10 @@ for hosp in h_list:
                 "Forecast": pred_fut
             }).round(2), use_container_width=True)
 
-            st.markdown("**Top 20 Feature Correlations with Target**")
-            corr = df2[['y'] + feats].corr().abs()['y'].drop('y').sort_values(ascending=False).head(20)
-            fig_corr, ax = plt.subplots(figsize=(10, 6))
-            sns.barplot(x=corr.values, y=corr.index, palette="coolwarm", ax=ax)
-            ax.set_title("Top 20 Feature Correlations with Target")
-            ax.set_xlabel("Correlation")
-            ax.set_ylabel("Feature")
-            st.pyplot(fig_corr)
+            # Top 20 Correlations
+            st.markdown("**Top 20 Correlated Features**")
+            corr_top = df2[['y'] + feats].corr()['y'].abs().sort_values(ascending=False)[1:21]
+            st.dataframe(corr_top.reset_index().rename(columns={"index": "Feature", "y": "Correlation"}))
 
             results.append({"Hospital": hosp, "Target": tgt, "Method": method, "Test MAE": round(mae_test, 2)})
 
