@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd 
 import numpy as np 
 from prophet import Prophet 
-from prophet.diagnostics 
-import cross_validation, performance_metrics 
+from prophet.diagnostics import cross_validation, performance_metrics 
 from lightgbm import LGBMRegressor 
 from sklearn.model_selection 
 import TimeSeriesSplit 
