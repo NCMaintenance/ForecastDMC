@@ -6,6 +6,7 @@ from prophet.diagnostics import cross_validation, performance_metrics
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error
+import optuna
 import plotly.graph_objs as go
 import warnings
 
@@ -91,15 +92,30 @@ for hosp in h_list:
         feats = ['y_lag1', 'y_lag2', 'y_diff1', 'roll_mean7', 'roll_std7', 'dow', 'month', 'dow_sin', 'dow_cos', 'yhat', 'yhat_lag1', 'yhat_lag7']
 
         X_tr, y_tr = train[feats], train['y']
-        tscv = TimeSeriesSplit(n_splits=5)
-        lgb_maes = []
-        for ti, vi in tscv.split(X_tr):
-            mdl = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31)
-            mdl.fit(X_tr.iloc[ti], y_tr.iloc[ti])
-            lgb_maes.append(mean_absolute_error(y_tr.iloc[vi], mdl.predict(X_tr.iloc[vi])))
-        mae_lgb = np.mean(lgb_maes)
 
-        lgb_final = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31)
+        def objective(trial):
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 50, 500),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
+                "num_leaves": trial.suggest_int("num_leaves", 20, 100),
+                "max_depth": trial.suggest_int("max_depth", 3, 12)
+            }
+            tscv = TimeSeriesSplit(n_splits=5)
+            maes = []
+            for ti, vi in tscv.split(X_tr):
+                mdl = LGBMRegressor(**params)
+                mdl.fit(X_tr.iloc[ti], y_tr.iloc[ti])
+                preds = mdl.predict(X_tr.iloc[vi])
+                maes.append(mean_absolute_error(y_tr.iloc[vi], preds))
+            return np.mean(maes)
+
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=7)
+
+        best_params = study.best_params
+        mae_lgb = study.best_value
+
+        lgb_final = LGBMRegressor(**best_params)
         lgb_final.fit(X_tr, y_tr)
         l_test = lgb_final.predict(test[feats])
 
@@ -187,7 +203,7 @@ for hosp in h_list:
             "Forecast": pred_fut
         }).round(2), use_container_width=True)
 
-        results.append({"Hospital": hosp, "Target": tgt, "Method": method, "📉 Test MAE": round(mae_test, 2)})
+        results.append({"Hospital": hosp, "Target": tgt, "Method": method, "📉 Test MAE": round(mae_test, 2), "Best Params": best_params})
 
 # 📊 Summary
 st.subheader("📊 Summary")
