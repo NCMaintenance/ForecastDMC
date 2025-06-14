@@ -1,4 +1,15 @@
-import streamlit as st import pandas as pd import numpy as np from prophet import Prophet from prophet.diagnostics import cross_validation, performance_metrics from lightgbm import LGBMRegressor from sklearn.model_selection import TimeSeriesSplit from sklearn.metrics import mean_absolute_error import plotly.graph_objs as go import warnings
+import streamlit as st 
+import pandas as pd 
+import numpy as np 
+from prophet import Prophet 
+from prophet.diagnostics 
+import cross_validation, performance_metrics 
+from lightgbm import LGBMRegressor 
+from sklearn.model_selection 
+import TimeSeriesSplit 
+from sklearn.metrics import mean_absolute_error 
+import plotly.graph_objs as go 
+import warnings
 
 warnings.filterwarnings("ignore")
 
@@ -165,4 +176,3 @@ for tgt in t_list:
     results.append({"Hospital": hosp, "Target": tgt, "Method": method, "Test MAE": round(mae_test, 2)})
 
 st.subheader("📊 Summary") st.dataframe(pd.DataFrame(results), use_container_width=True)
-
