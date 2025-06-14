@@ -16,6 +16,7 @@ st.title("Hospital Forecasting with Prophet & LightGBM")
 
 # Sidebar
 uploaded = st.sidebar.file_uploader("Upload Excel file", type="xlsx")
+hospitals = []
 targets = [
     "Tracker8am", "Tracker2pm", "Tracker8pm",
     "AdditionalCapacityOpen Morning",
@@ -56,7 +57,6 @@ for hosp in h_list:
             st.warning("Skipping (nulls present)")
             continue
 
-        # Prepare data for Prophet and LightGBM
         df2 = df_h[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
         df2['y_lag1'] = df2['y'].shift(1)
         df2['y_lag2'] = df2['y'].shift(2)
@@ -64,92 +64,119 @@ for hosp in h_list:
 
         df2['dow'] = df2['ds'].dt.weekday
         df2['month'] = df2['ds'].dt.month
+        df2['week'] = df2['ds'].dt.isocalendar().week.astype(int)
+        df2['dayofyear'] = df2['ds'].dt.dayofyear
         df2['dow_sin'] = np.sin(2 * np.pi * df2['dow'] / 7)
         df2['dow_cos'] = np.cos(2 * np.pi * df2['dow'] / 7)
+        df2['roll_mean7'] = df2['y'].rolling(window=7).mean()
+        df2['roll_std7'] = df2['y'].rolling(window=7).std()
 
+        # Drop NA before fitting Prophet and creating features
         df2 = df2.dropna().reset_index(drop=True)
 
-        # Fit Prophet model to get yhat
+        # Fit Prophet on entire available data for features
         m_feat = Prophet(yearly_seasonality=True, weekly_seasonality=True,
                          daily_seasonality=False, seasonality_mode='additive')
         m_feat.add_country_holidays(country_name='Ireland')
         m_feat.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         m_feat.fit(df2[['ds', 'y']])
+
+        # Base Prophet prediction for existing dates
         prophet_feat = m_feat.predict(df2[['ds']])[['ds', 'yhat']]
-
-        # Merge Prophet predictions and add lag features for yhat 1 to 7
         df2 = df2.merge(prophet_feat, on='ds')
-        for lag in range(1, 8):
-            df2[f'yhat_lag{lag}'] = df2['yhat'].shift(lag)
+        df2['yhat_lag1'] = df2['yhat'].shift(1)
+        df2['yhat_lag7'] = df2['yhat'].shift(7)
 
+        # --- New part: add 7-day ahead Prophet forecast columns ---
+        # Initialize columns
+        for i in range(1, 8):
+            df2[f'yhat_plus_{i}'] = np.nan
+
+        # For each date except last 7 rows (no full future forecast possible)
+        for idx in range(len(df2) - 7):
+            date = df2.loc[idx, 'ds']
+            future_dates = pd.date_range(start=date + pd.Timedelta(days=1), periods=7)
+            future_df = pd.DataFrame({'ds': future_dates})
+            preds = m_feat.predict(future_df)['yhat'].values
+            for i in range(7):
+                df2.at[idx, f'yhat_plus_{i+1}'] = preds[i]
+
+        # Drop rows with NaNs caused by last 7 rows not having 7-days-ahead forecasts
         df2 = df2.dropna().reset_index(drop=True)
 
-        # Split train/test
         n = len(df2)
         split = int(0.8 * n)
         train = df2.iloc[:split].reset_index(drop=True)
         test = df2.iloc[split:].reset_index(drop=True)
 
-        # Features for LightGBM
-        feats = ['y_lag1', 'y_lag2', 'y_diff1',
-                 'dow', 'month', 'dow_sin', 'dow_cos', 'yhat'] + [f'yhat_lag{i}' for i in range(1, 8)]
+        feats = ['y_lag1', 'y_lag2', 'y_diff1', 'roll_mean7', 'roll_std7',
+                 'dow', 'month', 'dow_sin', 'dow_cos', 'yhat',
+                 'yhat_lag1', 'yhat_lag7'] + [f'yhat_plus_{i}' for i in range(1, 8)]
 
         X_tr, y_tr = train[feats], train['y']
-
-        # Cross-validation LightGBM
         tscv = TimeSeriesSplit(n_splits=5)
         lgb_maes = []
+
         for ti, vi in tscv.split(X_tr):
             mdl = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31)
             mdl.fit(X_tr.iloc[ti], y_tr.iloc[ti])
             lgb_maes.append(mean_absolute_error(y_tr.iloc[vi], mdl.predict(X_tr.iloc[vi])))
         mae_lgb = np.mean(lgb_maes)
 
-        # Train final LightGBM model
         lgb_final = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31)
         lgb_final.fit(X_tr, y_tr)
         l_test = lgb_final.predict(test[feats])
 
-        # Fit full Prophet model for future forecast
+        # Fit full Prophet for future forecast
         m_full = Prophet(yearly_seasonality=True, weekly_seasonality=True,
                          daily_seasonality=False, seasonality_mode='additive')
         m_full.add_country_holidays(country_name='Ireland')
         m_full.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         m_full.fit(df2[['ds', 'y']])
-
         fut_pd = m_full.make_future_dataframe(periods=future_days, include_history=False)
         fut_res = m_full.predict(fut_pd)
         p_prop_fut = fut_res['yhat'].values
 
-        # Prepare future features for LightGBM
+        # Prepare future dataframe for LightGBM features (rolling lags + prophet multi-day forecasts)
         lag_df = df2.copy()
         for _ in range(future_days):
             last = lag_df.iloc[-1]
             nd = last['ds'] + pd.Timedelta(days=1)
             yhat = m_full.predict(pd.DataFrame({'ds': [nd]}))['yhat'].values[0]
+
+            # To get multi-day ahead Prophet forecasts for future lag_df rows,
+            # we'll predict days 1 to 7 ahead for 'nd' date as well
+            future_dates = pd.date_range(start=nd + pd.Timedelta(days=1), periods=7)
+            future_df = pd.DataFrame({'ds': future_dates})
+            preds_7days = m_full.predict(future_df)['yhat'].values
+
+            # Collect prophet_plus_i forecasts for the current future day (which is lag 0 here)
+            yhat_plus = {}
+            for i in range(7):
+                yhat_plus[f'yhat_plus_{i+1}'] = preds_7days[i]
+
             row = {
                 'ds': nd,
                 'y': np.nan,
                 'y_lag1': last['y'],
                 'y_lag2': last['y_lag1'],
-                'y_diff1': last['y'] - last['y_lag1'],
+                'y_diff1': last['y_lag1'] - last['y_lag2'],
+                'roll_mean7': lag_df['y'].iloc[-7:].mean(),
+                'roll_std7': lag_df['y'].iloc[-7:].std(),
                 'dow': nd.weekday(),
                 'month': nd.month,
                 'dow_sin': np.sin(2 * np.pi * nd.weekday() / 7),
                 'dow_cos': np.cos(2 * np.pi * nd.weekday() / 7),
                 'yhat': yhat,
+                'yhat_lag1': last['yhat'],
+                'yhat_lag7': lag_df['yhat'].iloc[-7] if len(lag_df) >= 7 else last['yhat']
             }
-            # Add Prophet lagged yhat 1 to 7
-            for lag in range(1, 8):
-                if len(lag_df) >= lag:
-                    row[f'yhat_lag{lag}'] = lag_df['yhat'].iloc[-lag]
-                else:
-                    row[f'yhat_lag{lag}'] = last['yhat']
+            row.update(yhat_plus)
+
             lag_df = pd.concat([lag_df, pd.DataFrame([row])], ignore_index=True)
 
         p_lgb_fut = lgb_final.predict(lag_df[feats].iloc[-future_days:])
 
-        # Evaluate Prophet with cross-validation
         try:
             cv = cross_validation(m_full, initial='180 days', period='30 days',
                                   horizon='30 days', parallel=None)
@@ -157,7 +184,6 @@ for hosp in h_list:
         except Exception:
             mae_prophet = np.inf
 
-        # Combine predictions weighted by inverse MAE
         if np.isinf(mae_prophet):
             pred_test = l_test
             method = "LGBM only"
@@ -171,7 +197,6 @@ for hosp in h_list:
         mae_test = mean_absolute_error(test['y'], pred_test)
         pred_fut = (w_p * p_prop_fut + w_l * p_lgb_fut) / S if not np.isinf(mae_prophet) else p_lgb_fut
 
-        # Plot results
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual'))
         fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines+markers', name='Pred (test)'))
@@ -181,7 +206,6 @@ for hosp in h_list:
                           xaxis_title="Date", yaxis_title=tgt, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Show test set results
         st.markdown("**Test-set Results**")
         st.dataframe(pd.DataFrame({
             "Date": test['ds'],
@@ -190,7 +214,6 @@ for hosp in h_list:
             "Error": np.abs(test['y'] - pred_test)
         }).round(2), use_container_width=True)
 
-        # Show future forecast
         st.markdown("**Future Forecast**")
         st.dataframe(pd.DataFrame({
             "Date": fut_pd['ds'],
