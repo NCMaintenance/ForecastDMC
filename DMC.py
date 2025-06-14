@@ -12,10 +12,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(layout="wide")
-st.title("Hospital Forecasting with Prophet & LightGBM")
+st.title("🏥 Hospital Forecasting with Prophet & LightGBM 📈")
 
 # Sidebar
-uploaded = st.sidebar.file_uploader("Upload Excel file", type="xlsx")
+uploaded = st.sidebar.file_uploader("📂 Upload Excel file", type="xlsx")
 hospitals = []
 targets = [
     "Tracker8am", "Tracker2pm", "Tracker8pm",
@@ -24,7 +24,7 @@ targets = [
 ]
 
 if not uploaded:
-    st.sidebar.info("Please upload your Excel file.")
+    st.sidebar.info("ℹ️ Please upload your Excel file.")
     st.stop()
 
 # Load data
@@ -33,13 +33,13 @@ df['Date'] = pd.to_datetime(df['Date'])
 df = df.sort_values('Date')
 hospitals = sorted(df['Hospital'].unique())
 
-sel_hosp = st.sidebar.selectbox("Hospital", ["All"] + hospitals)
-sel_target = st.sidebar.selectbox("Target", ["All"] + targets)
-future_days = st.sidebar.slider("Forecast horizon (days ahead)", 7, 30, 14)
-run = st.sidebar.button("Run Forecast")
+sel_hosp = st.sidebar.selectbox("🏨 Hospital", ["All"] + hospitals)
+sel_target = st.sidebar.selectbox("🎯 Target", ["All"] + targets)
+future_days = st.sidebar.slider("⏳ Forecast horizon (days ahead)", 7, 30, 14)
+run = st.sidebar.button("▶️ Run Forecast")
 
 if not run:
-    st.sidebar.info("Configure then click Run Forecast")
+    st.sidebar.info("⚙️ Configure then click Run Forecast")
     st.stop()
 
 # Filters
@@ -48,13 +48,13 @@ t_list = targets if sel_target == "All" else [sel_target]
 results = []
 
 for hosp in h_list:
-    st.header(f"Hospital: {hosp}")
+    st.header(f"🏥 Hospital: {hosp}")
     df_h = df[df['Hospital'] == hosp].reset_index(drop=True)
 
     for tgt in t_list:
-        st.subheader(f"Target: {tgt}")
+        st.subheader(f"🎯 Target: {tgt}")
         if df_h[tgt].isna().any():
-            st.warning("Skipping (nulls present)")
+            st.warning("⚠️ Skipping due to null values in target")
             continue
 
         df2 = df_h[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
@@ -85,7 +85,7 @@ for hosp in h_list:
         df2['yhat_lag7'] = df2['yhat'].shift(7)
         df2 = df2.dropna().reset_index(drop=True)
 
-        # Add Prophet multi-day ahead forecasts as features for each row
+        # Add Prophet multi-day ahead forecasts as features
         def add_prophet_multi_ahead_feats(row, model):
             future_pd = pd.DataFrame({'ds': [row['ds'] + pd.Timedelta(days=d) for d in range(1, 8)]})
             fut_pred = model.predict(future_pd)
@@ -202,22 +202,13 @@ for hosp in h_list:
 
         if np.isinf(mae_prophet):
             pred_test = l_test
-            method = "LGBM only"
-        else:
-            w_p = 1 / mae_prophet
-            w_l = 1 / mae_lgb
-            S = w_p + w_l
-            pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_l * l_test)
-
-if np.isinf(mae_prophet):
-            pred_test = l_test
-            method = "LGBM only"
+            method = "LightGBM only 🔥"
         else:
             w_p = 1 / mae_prophet
             w_l = 1 / mae_lgb
             S = w_p + w_l
             pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_l * l_test) / S
-            method = f"Weighted Prophet + LGBM (weights: {w_p:.2f}, {w_l:.2f})"
+            method = f"Weighted Prophet + LightGBM (weights: {w_p:.2f}, {w_l:.2f}) ⚖️"
 
         # Weighted future forecast between Prophet base and LGBM rolling
         if np.isinf(mae_prophet):
@@ -249,9 +240,9 @@ if np.isinf(mae_prophet):
         st.plotly_chart(fig2, use_container_width=True)
 
         # Summary stats
-        st.write(f"MAE LightGBM CV: {mae_lgb:.3f}")
-        st.write(f"MAE Prophet CV: {mae_prophet if not np.isinf(mae_prophet) else 'Unavailable'}")
-        st.write(f"Forecast Method Used: {method}")
+        st.write(f"📊 MAE LightGBM CV: {mae_lgb:.3f}")
+        st.write(f"📊 MAE Prophet CV: {mae_prophet if not np.isinf(mae_prophet) else 'Unavailable'}")
+        st.write(f"🔍 Forecast Method Used: {method}")
 
         results.append({
             'Hospital': hosp,
@@ -261,5 +252,5 @@ if np.isinf(mae_prophet):
             'Method': method
         })
 
-st.sidebar.write("### Summary Results")
+st.sidebar.write("### 📋 Summary Results")
 st.sidebar.dataframe(pd.DataFrame(results))
