@@ -4,8 +4,7 @@ import numpy as np
 from prophet import Prophet 
 from prophet.diagnostics import cross_validation, performance_metrics 
 from lightgbm import LGBMRegressor 
-from sklearn.model_selection 
-import TimeSeriesSplit 
+from sklearn.model_selection import TimeSeriesSplit 
 from sklearn.metrics import mean_absolute_error 
 import plotly.graph_objs as go 
 import warnings
