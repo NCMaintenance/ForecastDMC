@@ -1,95 +1,49 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from prophet import Prophet
-from lightgbm import LGBMRegressor
-from sklearn.metrics import mean_absolute_error
-import optuna
+import shap
 import plotly.graph_objs as go
 import warnings
-import random
+
+from prophet import Prophet
+from prophet.diagnostics import cross_validation, performance_metrics
+from lightgbm import LGBMRegressor
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
 
 warnings.filterwarnings("ignore")
-
-# Set seeds for reproducibility
-np.random.seed(42)
-random.seed(42)
-
 st.set_page_config(layout="wide")
-st.title("📈 Hospital Forecasting with Prophet & LightGBM + Optuna Tuning")
+st.title("📈 Hospital Forecasting with SHAP Explanations")
 
-uploaded = st.sidebar.file_uploader("📤 Upload Excel file", type="xlsx")
-targets = [
-    "Tracker8am", "Tracker2pm", "Tracker8pm",
-    "AdditionalCapacityOpen Morning"
-]
-
+# Upload
+uploaded = st.sidebar.file_uploader("Upload Excel file", type="xlsx")
 if not uploaded:
-    st.sidebar.info("📄 Please upload your Excel file.")
+    st.sidebar.info("Please upload your Excel file.")
     st.stop()
 
+# Load data
 df = pd.read_excel(uploaded)
 df['Date'] = pd.to_datetime(df['Date'])
 df = df.sort_values('Date')
 hospitals = sorted(df['Hospital'].unique())
 
-sel_hosp = st.sidebar.selectbox("🏥 Select Hospital", ["All"] + hospitals)
-sel_target = st.sidebar.selectbox("🎯 Select Target", ["All"] + targets)
-
-# Changed slider to allow only 1 day forecast for your request
-future_days = st.sidebar.slider("🔮 Forecast horizon (days ahead)", 1, 7, 1)
-
+# Sidebar
+sel_hosp = st.sidebar.selectbox("Hospital", ["All"] + hospitals)
+targets = [
+    "Tracker8am", "Tracker2pm", "Tracker8pm",
+    "AdditionalCapacityOpen Morning",
+    "TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"
+]
+sel_target = st.sidebar.selectbox("Target", ["All"] + targets)
+future_days = st.sidebar.slider("Forecast horizon (days ahead)", 7, 30, 14)
 run = st.sidebar.button("🚀 Run Forecast")
+
 if not run:
-    st.sidebar.info("⚙️ Configure then click Run Forecast")
+    st.sidebar.info("Configure then click Run Forecast")
     st.stop()
 
 h_list = hospitals if sel_hosp == "All" else [sel_hosp]
 t_list = targets if sel_target == "All" else [sel_target]
-
-def create_features(df2):
-    df2['y_lag1'] = df2['y'].shift(1)
-    df2['y_lag2'] = df2['y'].shift(2)
-    df2['y_diff1'] = df2['y'] - df2['y'].shift(1)
-    df2['dow'] = df2['ds'].dt.weekday
-    df2['month'] = df2['ds'].dt.month
-    df2['week'] = df2['ds'].dt.isocalendar().week.astype(int)
-    df2['dayofyear'] = df2['ds'].dt.dayofyear
-    df2['dow_sin'] = np.sin(2 * np.pi * df2['dow'] / 7)
-    df2['dow_cos'] = np.cos(2 * np.pi * df2['dow'] / 7)
-    df2['roll_mean7'] = df2['y'].rolling(window=7).mean()
-    df2['roll_std7'] = df2['y'].rolling(window=7).std()
-    return df2.dropna().reset_index(drop=True)
-
-def get_prophet_features(df2):
-    m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False, seasonality_mode='additive')
-    m.add_country_holidays(country_name='IE')
-    m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-    m.fit(df2[['ds', 'y']])
-    prophet_pred = m.predict(df2[['ds']])[['ds', 'yhat']]
-    df2 = df2.merge(prophet_pred, on='ds')
-    df2['yhat_lag1'] = df2['yhat'].shift(1)
-    df2['yhat_lag7'] = df2['yhat'].shift(7)
-    return df2.dropna().reset_index(drop=True), m
-
-def objective(trial, X_train, y_train, X_val, y_val):
-    params = {
-        "n_estimators": trial.suggest_int("n_estimators", 100, 600),
-        "learning_rate": trial.suggest_loguniform("learning_rate", 0.01, 0.1),
-        "num_leaves": trial.suggest_int("num_leaves", 20, 50),
-        "min_child_samples": trial.suggest_int("min_child_samples", 5, 30),
-        "subsample": trial.suggest_uniform("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_uniform("colsample_bytree", 0.6, 1.0),
-        "reg_alpha": trial.suggest_loguniform("reg_alpha", 1e-4, 1.0),
-        "reg_lambda": trial.suggest_loguniform("reg_lambda", 1e-4, 1.0),
-        "random_state": 42
-    }
-    model = LGBMRegressor(**params)
-    model.fit(X_train, y_train)
-    preds = model.predict(X_val)
-    mae = mean_absolute_error(y_val, preds)
-    return mae
-
 results = []
 
 for hosp in h_list:
@@ -98,160 +52,160 @@ for hosp in h_list:
 
     for tgt in t_list:
         st.subheader(f"🎯 {tgt}")
-
         if df_h[tgt].isna().any():
-            st.warning("⛔ Skipping due to null values")
+            st.warning("Skipping (nulls present)")
             continue
 
-        # Prepare data with features + prophet
+        # Feature engineering
         df2 = df_h[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
-        df2 = create_features(df2)
-        df2, prophet_model = get_prophet_features(df2)
+        df2['y_lag1'] = df2['y'].shift(1)
+        df2['y_lag2'] = df2['y'].shift(2)
+        df2['y_diff1'] = df2['y'] - df2['y'].shift(1)
+        df2['dow'] = df2['ds'].dt.weekday
+        df2['month'] = df2['ds'].dt.month
+        df2['dow_sin'] = np.sin(2 * np.pi * df2['dow'] / 7)
+        df2['dow_cos'] = np.cos(2 * np.pi * df2['dow'] / 7)
+        df2['roll_mean7'] = df2['y'].rolling(window=7).mean()
+        df2['roll_std7'] = df2['y'].rolling(window=7).std()
+        df2 = df2.dropna().reset_index(drop=True)
 
-        feats = ['y_lag1', 'y_lag2', 'y_diff1', 'roll_mean7', 'roll_std7', 'dow', 'month',
-                 'dow_sin', 'dow_cos', 'yhat', 'yhat_lag1', 'yhat_lag7']
+        # Prophet features
+        m_feat = Prophet(yearly_seasonality=True, weekly_seasonality=True)
+        m_feat.add_country_holidays(country_name='IE')
+        m_feat.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+        m_feat.fit(df2[['ds', 'y']])
+        prophet_feat = m_feat.predict(df2[['ds']])[['ds', 'yhat']]
+        df2 = df2.merge(prophet_feat, on='ds')
+        df2['yhat_lag1'] = df2['yhat'].shift(1)
+        df2['yhat_lag7'] = df2['yhat'].shift(7)
+        df2 = df2.dropna().reset_index(drop=True)
 
-        # Rolling windows tuning: 7 windows, 1-day horizon validation
-        window_size = 180  # training days
-        val_horizon = 1    # 1 day validation horizon
-        total_len = len(df2)
+        feats = [
+            'y_lag1', 'y_lag2', 'y_diff1', 'roll_mean7', 'roll_std7',
+            'dow', 'month', 'dow_sin', 'dow_cos', 'yhat', 'yhat_lag1', 'yhat_lag7'
+        ]
 
-        if total_len < window_size + val_horizon + 7:
-            st.warning("⚠️ Not enough data for rolling tuning")
-            continue
+        # Train/test split
+        n = len(df2)
+        split = int(0.8 * n)
+        train = df2.iloc[:split]
+        test = df2.iloc[split:]
 
-        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+        X_tr, y_tr = train[feats], train['y']
 
-        def optuna_objective(trial):
-            maes = []
-            # Run rolling validation for the trial params
-            # Only one window for tuning to keep fast
-            start = total_len - window_size - val_horizon
-            train_idx = range(start, start + window_size)
-            val_idx = [start + window_size]
+        # Cross-validation
+        tscv = TimeSeriesSplit(n_splits=5)
+        lgb_maes = []
+        for ti, vi in tscv.split(X_tr):
+            mdl = LGBMRegressor(n_estimators=200, learning_rate=0.05)
+            mdl.fit(X_tr.iloc[ti], y_tr.iloc[ti])
+            lgb_maes.append(mean_absolute_error(y_tr.iloc[vi], mdl.predict(X_tr.iloc[vi])))
+        mae_lgb = np.mean(lgb_maes)
 
-            X_train = df2.loc[train_idx, feats]
-            y_train = df2.loc[train_idx, 'y']
-            X_val = df2.loc[val_idx, feats]
-            y_val = df2.loc[val_idx, 'y']
+        # Final model
+        lgb_final = LGBMRegressor(n_estimators=200, learning_rate=0.05)
+        lgb_final.fit(X_tr, y_tr)
 
-            mae = objective(trial, X_train, y_train, X_val, y_val)
-            maes.append(mae)
+        # SHAP
+        explainer = shap.Explainer(lgb_final)
+        shap_values = explainer(X_tr)
+        st.markdown("### 🔍 SHAP Feature Impact")
+        st.pyplot(shap.summary_plot(shap_values, X_tr, plot_type="bar", show=False))
 
-            return np.mean(maes)
+        # Recursive forecast setup
+        future_preds_lgb = []
+        future_preds_prophet = []
+        lag_df = df2.copy()
 
-        # Run tuning for 50 trials (adjustable)
-        study.optimize(optuna_objective, n_trials=50, show_progress_bar=True)
+        m_full = Prophet(yearly_seasonality=True, weekly_seasonality=True)
+        m_full.add_country_holidays(country_name='IE')
+        m_full.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+        m_full.fit(df2[['ds', 'y']])
 
-        best_params = study.best_params
-        st.write(f"✅ Best hyperparameters found: {best_params}")
-
-        # Train final model on all data except last future_days (to validate)
-        train_final = df2.iloc[:-future_days].reset_index(drop=True)
-        test_final = df2.iloc[-future_days:].reset_index(drop=True)
-
-        X_train_final = train_final[feats]
-        y_train_final = train_final['y']
-        X_test_final = test_final[feats]
-        y_test_final = test_final['y']
-
-        model_final = LGBMRegressor(**best_params)
-        model_final.fit(X_train_final, y_train_final)
-
-        # Iterative 1-day ahead forecasting for future_days
-        lag_df = df2.iloc[:-future_days].copy()
-        preds_iterative = []
-
-        for day in range(future_days):
+        for _ in range(future_days):
             last = lag_df.iloc[-1]
             next_date = last['ds'] + pd.Timedelta(days=1)
+            yhat_prophet = m_full.predict(pd.DataFrame({'ds': [next_date]}))['yhat'].values[0]
 
-            prophet_pred = prophet_model.predict(pd.DataFrame({'ds': [next_date]}))['yhat'].values[0]
-
-            window = min(7, len(lag_df))
-
-            row = {
+            new_row = {
                 'ds': next_date,
                 'y': np.nan,
                 'y_lag1': last['y'],
                 'y_lag2': last['y_lag1'],
                 'y_diff1': last['y_lag1'] - last['y_lag2'],
-                'roll_mean7': lag_df['y'].iloc[-window:].mean(),
-                'roll_std7': lag_df['y'].iloc[-window:].std(),
+                'roll_mean7': lag_df['y'].iloc[-7:].mean(),
+                'roll_std7': lag_df['y'].iloc[-7:].std(),
                 'dow': next_date.weekday(),
                 'month': next_date.month,
                 'dow_sin': np.sin(2 * np.pi * next_date.weekday() / 7),
                 'dow_cos': np.cos(2 * np.pi * next_date.weekday() / 7),
-                'yhat': prophet_pred,
+                'yhat': yhat_prophet,
                 'yhat_lag1': last['yhat'],
                 'yhat_lag7': lag_df['yhat'].iloc[-7] if len(lag_df) >= 7 else last['yhat']
             }
-            row_df = pd.DataFrame([row])
-            pred_lgb = model_final.predict(row_df[feats])[0]
-            row['y'] = pred_lgb
 
-            if day < 3:
-                st.write(f"Day {day+1} forecast features:", row)
-                st.write(f"Predicted y: {pred_lgb}")
+            lag_df = pd.concat([lag_df, pd.DataFrame([new_row])], ignore_index=True)
+            X_new = lag_df[feats].iloc[[-1]]
+            y_pred_lgb = lgb_final.predict(X_new)[0]
+            future_preds_lgb.append(y_pred_lgb)
+            future_preds_prophet.append(yhat_prophet)
+            lag_df.at[len(lag_df)-1, 'y'] = y_pred_lgb
 
-            preds_iterative.append(pred_lgb)
-            lag_df = pd.concat([lag_df, pd.DataFrame([row])], ignore_index=True)
+        # Blend LGBM + Prophet
+        try:
+            cv = cross_validation(m_full, initial='180 days', period='30 days', horizon='30 days')
+            mae_prophet = performance_metrics(cv)['mae'].mean()
+        except:
+            mae_prophet = np.inf
 
-        mae_test_final = mean_absolute_error(test_final['y'], preds_iterative)
+        if np.isinf(mae_prophet):
+            pred_test = lgb_final.predict(test[feats])
+            method = "LGBM only"
+            pred_fut = np.array(future_preds_lgb)
+        else:
+            w_p = 1 / mae_prophet
+            w_l = 1 / mae_lgb
+            S = w_p + w_l
+            pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values +
+                         w_l * lgb_final.predict(test[feats])) / S
+            pred_fut = (w_p * np.array(future_preds_prophet) + w_l * np.array(future_preds_lgb)) / S
+            method = f"Hybrid (P:{w_p/S:.2f},L:{w_l/S:.2f})"
 
+        mae_test = mean_absolute_error(test['y'], pred_test)
+
+        # Plot
+        fut_dates = pd.date_range(start=df2['ds'].max() + pd.Timedelta(days=1), periods=future_days)
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=test_final['ds'], y=test_final['y'], mode='lines+markers', name='Actual'))
-        fig.add_trace(go.Scatter(x=test_final['ds'], y=preds_iterative, mode='lines+markers', name='Forecast (Iterative)'))
-        fig.update_layout(title=f"{hosp} • {tgt} | Optuna tuned LGBM | 📉 MAE ({future_days}-day unseen): {mae_test_final:.2f}",
-                          xaxis_title="📅 Date", yaxis_title=tgt, template="plotly_white")
+        fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual'))
+        fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines+markers', name='Pred (test)'))
+        fig.add_trace(go.Scatter(x=fut_dates, y=pred_fut, mode='lines+markers',
+                                 name='Forecast', line=dict(dash='dash')))
+        fig.update_layout(title=f"{hosp} • {tgt} | {method} | MAE: {mae_test:.2f}",
+                          xaxis_title="Date", yaxis_title=tgt)
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown(f"**📉 {future_days}-day Unseen Test‑set Results**")
+        # Tables
+        st.markdown("**Test‑set Results**")
         st.dataframe(pd.DataFrame({
-            "📅 Date": test_final['ds'],
-            "Actual": test_final['y'],
-            "Predicted": preds_iterative,
-            "Error": np.abs(test_final['y'] - preds_iterative)
+            "Date": test['ds'],
+            "Actual": test['y'],
+            "Predicted": pred_test,
+            "Error": np.abs(test['y'] - pred_test)
         }).round(2), use_container_width=True)
 
-        # Final forecast beyond available data (optional)
-        forecast_start = df2['ds'].max()
-        forecast_dates = [forecast_start + pd.Timedelta(days=i+1) for i in range(future_days)]
-        preds_future = []
+        st.markdown("**Future Forecast**")
+        st.dataframe(pd.DataFrame({
+            "Date": fut_dates,
+            "Forecast": pred_fut
+        }).round(2), use_container_width=True)
 
-        for nd in forecast_dates:
-            last = lag_df.iloc[-1]
-            prophet_pred = prophet_model.predict(pd.DataFrame({'ds': [nd]}))['yhat'].values[0]
-
-            window = min(7, len(lag_df))
-
-            row = {
-                'ds': nd,
-                'y': np.nan,
-                'y_lag1': last['y'],
-                'y_lag2': last['y_lag1'],
-                'y_diff1': last['y_lag1'] - last['y_lag2'],
-                'roll_mean7': lag_df['y'].iloc[-window:].mean(),
-                'roll_std7': lag_df['y'].iloc[-window:].std(),
-                'dow': nd.weekday(),
-                'month': nd.month,
-                'dow_sin': np.sin(2 * np.pi * nd.weekday() / 7),
-                'dow_cos': np.cos(2 * np.pi * nd.weekday() / 7),
-                'yhat': prophet_pred,
-                'yhat_lag1': last['yhat'],
-                'yhat_lag7': lag_df['yhat'].iloc[-7] if len(lag_df) >= 7 else last['yhat']
-            }
-            row_df = pd.DataFrame([row])
-            pred = model_final.predict(row_df[feats])[0]
-            row['y'] = pred
-            preds_future.append(pred)
-            lag_df = pd.concat([lag_df, pd.DataFrame([row])], ignore_index=True)
-
-        st.markdown("### 🔮 Forecast for next days beyond available data")
-        df_forecast = pd.DataFrame({
-            "Date": forecast_dates,
-            "Forecast": preds_future
+        results.append({
+            "Hospital": hosp,
+            "Target": tgt,
+            "Method": method,
+            "Test MAE": round(mae_test, 2)
         })
-        st.dataframe(df_forecast.round(2))
 
-st.sidebar.success("Done! Scroll main panel for results.")
+# Summary
+st.subheader("📊 Summary")
+st.dataframe(pd.DataFrame(results), use_container_width=True)
