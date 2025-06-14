@@ -9,8 +9,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error
 from sklearn.inspection import permutation_importance
 import plotly.graph_objs as go
-import seaborn as sns
-import matplotlib.pyplot as plt
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -48,8 +46,6 @@ if not run:
 h_list = hospitals if sel_hosp == "All" else [sel_hosp]
 t_list = targets if sel_target == "All" else [sel_target]
 
-results = []
-
 for hosp in h_list:
     st.header(f"Hospital: {hosp}")
     df_h = df[df['Hospital'] == hosp].reset_index(drop=True)
@@ -61,6 +57,7 @@ for hosp in h_list:
                 st.warning("Skipping (nulls present)")
                 continue
 
+            # Feature engineering
             df2 = df_h[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
             df2['y_lag1'] = df2['y'].shift(1)
             df2['y_lag2'] = df2['y'].shift(2)
@@ -78,6 +75,11 @@ for hosp in h_list:
 
             df2 = df2.dropna().reset_index(drop=True)
 
+            if len(df2) < 2:
+                st.warning(f"Skipping {hosp} - {tgt}: Not enough data after feature engineering")
+                continue
+
+            # Prophet model for features
             m_feat = Prophet(yearly_seasonality=True, weekly_seasonality=True, seasonality_mode='additive')
             m_feat.add_country_holidays(country_name='Ireland')
             m_feat.add_seasonality(name='monthly', period=30.5, fourier_order=5)
@@ -89,6 +91,11 @@ for hosp in h_list:
             df2['yhat_lag7'] = df2['yhat'].shift(7)
             df2 = df2.dropna().reset_index(drop=True)
 
+            if len(df2) < 2:
+                st.warning(f"Skipping {hosp} - {tgt}: Not enough data after adding prophet features")
+                continue
+
+            # Split data
             n = len(df2)
             split = int(0.8 * n)
             train = df2.iloc[:split].reset_index(drop=True)
@@ -107,7 +114,6 @@ for hosp in h_list:
             lgb_final = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31)
             lgb_final.fit(X_tr, y_tr)
 
-            # Check for harmful features
             perm = permutation_importance(lgb_final, test[feats], test['y'], scoring='neg_mean_absolute_error', n_repeats=5, random_state=42)
             perm_imp = pd.Series(perm.importances_mean, index=feats)
             harmful_feats = perm_imp[perm_imp < 0].index.tolist()
@@ -117,6 +123,7 @@ for hosp in h_list:
 
             l_test = lgb_final.predict(test[feats])
 
+            # Prophet full model for forecasting
             m_full = Prophet(yearly_seasonality=True, weekly_seasonality=True, seasonality_mode='additive')
             m_full.add_country_holidays(country_name='Ireland')
             m_full.add_seasonality(name='monthly', period=30.5, fourier_order=5)
@@ -125,6 +132,7 @@ for hosp in h_list:
             fut_res = m_full.predict(fut_pd)
             p_prop_fut = fut_res['yhat'].values
 
+            # Prepare features for future LGBM forecast
             lag_df = df2.copy()
             for _ in range(future_days):
                 last = lag_df.iloc[-1]
@@ -149,25 +157,29 @@ for hosp in h_list:
 
             p_lgb_fut = lgb_final.predict(lag_df[feats].iloc[-future_days:])
 
+            # Prophet cross-validation MAE
             try:
                 cv = cross_validation(m_full, initial='180 days', period='30 days', horizon='30 days', parallel=None)
                 mae_prophet = performance_metrics(cv)['mae'].mean()
-            except:
+            except Exception:
                 mae_prophet = np.inf
 
+            # Combine forecasts
             if np.isinf(mae_prophet):
                 pred_test = l_test
                 method = "LGBM only"
+                pred_fut = p_lgb_fut
             else:
                 w_p = 1 / mae_prophet
                 w_l = 1 / mae_lgb
                 S = w_p + w_l
                 pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_l * l_test) / S
+                pred_fut = (w_p * p_prop_fut + w_l * p_lgb_fut) / S
                 method = f"Hybrid (P:{w_p/S:.2f},L:{w_l/S:.2f})"
 
             mae_test = mean_absolute_error(test['y'], pred_test)
-            pred_fut = (w_p * p_prop_fut + w_l * p_lgb_fut) / S if not np.isinf(mae_prophet) else p_lgb_fut
 
+            # Plot results
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual'))
             fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines+markers', name='Pred (test)'))
@@ -176,29 +188,11 @@ for hosp in h_list:
                               xaxis_title="Date", yaxis_title=tgt, template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
 
-            st.markdown("**Test‑set Results**")
-            st.dataframe(pd.DataFrame({
-                "Date": test['ds'],
-                "Actual": test['y'],
-                "Predicted": pred_test,
-                "Error": np.abs(test['y'] - pred_test)
-            }).round(2), use_container_width=True)
-
-            st.markdown("**Future Forecast**")
-            st.dataframe(pd.DataFrame({
-                "Date": fut_pd['ds'],
-                "Forecast": pred_fut
-            }).round(2), use_container_width=True)
-
-            # Top 20 Correlations
-            st.markdown("**Top 20 Correlated Features**")
-            corr_top = df2[['y'] + feats].corr()['y'].abs().sort_values(ascending=False)[1:21]
-            st.dataframe(corr_top.reset_index().rename(columns={"index": "Feature", "y": "Correlation"}))
-
-            results.append({"Hospital": hosp, "Target": tgt, "Method": method, "Test MAE": round(mae_test, 2)})
+            st.markdown("**Test-set Results**")
+            df_test_results = test[['ds', 'y']].copy()
+            df_test_results['Prediction'] = pred_test
+            df_test_results.columns = ['Date', 'Actual', 'Prediction']
+            st.dataframe(df_test_results)
 
         except Exception as e:
-            st.error(f"Error for {hosp} - {tgt}: {str(e)}")
-
-st.subheader("Summary")
-st.dataframe(pd.DataFrame(results), use_container_width=True)
+            st.error(f"Error processing {hosp} - {tgt}: {e}")
