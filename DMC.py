@@ -71,38 +71,29 @@ for hosp in h_list:
         df2['roll_mean7'] = df2['y'].rolling(window=7).mean()
         df2['roll_std7'] = df2['y'].rolling(window=7).std()
 
-        # Drop NA before fitting Prophet and creating features
         df2 = df2.dropna().reset_index(drop=True)
 
-        # Fit Prophet on entire available data for features
+        # Fit Prophet model for feature generation
         m_feat = Prophet(yearly_seasonality=True, weekly_seasonality=True,
                          daily_seasonality=False, seasonality_mode='additive')
         m_feat.add_country_holidays(country_name='Ireland')
         m_feat.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         m_feat.fit(df2[['ds', 'y']])
-
-        # Base Prophet prediction for existing dates
         prophet_feat = m_feat.predict(df2[['ds']])[['ds', 'yhat']]
         df2 = df2.merge(prophet_feat, on='ds')
         df2['yhat_lag1'] = df2['yhat'].shift(1)
         df2['yhat_lag7'] = df2['yhat'].shift(7)
-
-        # --- New part: add 7-day ahead Prophet forecast columns ---
-        # Initialize columns
-        for i in range(1, 8):
-            df2[f'yhat_plus_{i}'] = np.nan
-
-        # For each date except last 7 rows (no full future forecast possible)
-        for idx in range(len(df2) - 7):
-            date = df2.loc[idx, 'ds']
-            future_dates = pd.date_range(start=date + pd.Timedelta(days=1), periods=7)
-            future_df = pd.DataFrame({'ds': future_dates})
-            preds = m_feat.predict(future_df)['yhat'].values
-            for i in range(7):
-                df2.at[idx, f'yhat_plus_{i+1}'] = preds[i]
-
-        # Drop rows with NaNs caused by last 7 rows not having 7-days-ahead forecasts
         df2 = df2.dropna().reset_index(drop=True)
+
+        # Add Prophet multi-day ahead forecasts as features for each row
+        def add_prophet_multi_ahead_feats(row, model):
+            future_pd = pd.DataFrame({'ds': [row['ds'] + pd.Timedelta(days=d) for d in range(1, 8)]})
+            fut_pred = model.predict(future_pd)
+            for i, val in enumerate(fut_pred['yhat'].values, 1):
+                row[f'yhat_plus_{i}'] = val
+            return row
+
+        df2 = df2.apply(lambda row: add_prophet_multi_ahead_feats(row, m_feat), axis=1)
 
         n = len(df2)
         split = int(0.8 * n)
@@ -111,7 +102,9 @@ for hosp in h_list:
 
         feats = ['y_lag1', 'y_lag2', 'y_diff1', 'roll_mean7', 'roll_std7',
                  'dow', 'month', 'dow_sin', 'dow_cos', 'yhat',
-                 'yhat_lag1', 'yhat_lag7'] + [f'yhat_plus_{i}' for i in range(1, 8)]
+                 'yhat_lag1', 'yhat_lag7',
+                 'yhat_plus_1', 'yhat_plus_2', 'yhat_plus_3',
+                 'yhat_plus_4', 'yhat_plus_5', 'yhat_plus_6', 'yhat_plus_7']
 
         X_tr, y_tr = train[feats], train['y']
         tscv = TimeSeriesSplit(n_splits=5)
@@ -127,56 +120,79 @@ for hosp in h_list:
         lgb_final.fit(X_tr, y_tr)
         l_test = lgb_final.predict(test[feats])
 
-        # Fit full Prophet for future forecast
+        # Fit full Prophet model on entire data for forecasting
         m_full = Prophet(yearly_seasonality=True, weekly_seasonality=True,
                          daily_seasonality=False, seasonality_mode='additive')
         m_full.add_country_holidays(country_name='Ireland')
         m_full.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         m_full.fit(df2[['ds', 'y']])
+
+        # Prepare future dataframe for Prophet base forecast (used for weighting)
         fut_pd = m_full.make_future_dataframe(periods=future_days, include_history=False)
         fut_res = m_full.predict(fut_pd)
-        p_prop_fut = fut_res['yhat'].values
+        p_prop_fut_base = fut_res['yhat'].values  # base Prophet forecasts (1-step only)
 
-        # Prepare future dataframe for LightGBM features (rolling lags + prophet multi-day forecasts)
+        # Rolling forecast loop with full feature engineering each step (up to future_days)
         lag_df = df2.copy()
-        for _ in range(future_days):
+
+        for i in range(future_days):
             last = lag_df.iloc[-1]
             nd = last['ds'] + pd.Timedelta(days=1)
-            yhat = m_full.predict(pd.DataFrame({'ds': [nd]}))['yhat'].values[0]
 
-            # To get multi-day ahead Prophet forecasts for future lag_df rows,
-            # we'll predict days 1 to 7 ahead for 'nd' date as well
-            future_dates = pd.date_range(start=nd + pd.Timedelta(days=1), periods=7)
-            future_df = pd.DataFrame({'ds': future_dates})
-            preds_7days = m_full.predict(future_df)['yhat'].values
+            # Prophet multi-day forecasts for next 7 days starting from nd
+            future_pd_7 = pd.DataFrame({'ds': [nd + pd.Timedelta(days=d) for d in range(7)]})
+            fut_res_7 = m_full.predict(future_pd_7)
+            yhat_plus = fut_res_7['yhat'].values
 
-            # Collect prophet_plus_i forecasts for the current future day (which is lag 0 here)
-            yhat_plus = {}
-            for i in range(7):
-                yhat_plus[f'yhat_plus_{i+1}'] = preds_7days[i]
+            # Compute lags and rolling features for new day
+            y_lag1 = last['y'] if not np.isnan(last['y']) else lag_df['y'].iloc[-1]
+            y_lag2 = lag_df['y_lag1'].iloc[-1] if 'y_lag1' in lag_df.columns else np.nan
+            y_diff1 = y_lag1 - y_lag2 if not (np.isnan(y_lag1) or np.isnan(y_lag2)) else 0
 
-            row = {
+            recent_y = lag_df['y'].iloc[-7:].copy()
+            roll_mean7 = recent_y.mean()
+            roll_std7 = recent_y.std()
+
+            dow = nd.weekday()
+            month = nd.month
+            dow_sin = np.sin(2 * np.pi * dow / 7)
+            dow_cos = np.cos(2 * np.pi * dow / 7)
+
+            new_row = {
                 'ds': nd,
                 'y': np.nan,
-                'y_lag1': last['y'],
-                'y_lag2': last['y_lag1'],
-                'y_diff1': last['y_lag1'] - last['y_lag2'],
-                'roll_mean7': lag_df['y'].iloc[-7:].mean(),
-                'roll_std7': lag_df['y'].iloc[-7:].std(),
-                'dow': nd.weekday(),
-                'month': nd.month,
-                'dow_sin': np.sin(2 * np.pi * nd.weekday() / 7),
-                'dow_cos': np.cos(2 * np.pi * nd.weekday() / 7),
-                'yhat': yhat,
-                'yhat_lag1': last['yhat'],
-                'yhat_lag7': lag_df['yhat'].iloc[-7] if len(lag_df) >= 7 else last['yhat']
+                'y_lag1': y_lag1,
+                'y_lag2': y_lag2,
+                'y_diff1': y_diff1,
+                'roll_mean7': roll_mean7,
+                'roll_std7': roll_std7,
+                'dow': dow,
+                'month': month,
+                'dow_sin': dow_sin,
+                'dow_cos': dow_cos,
+                'yhat': yhat_plus[0],
+                'yhat_lag1': last['yhat'] if 'yhat' in last else yhat_plus[0],
+                'yhat_lag7': lag_df['yhat'].iloc[-7] if len(lag_df) >= 7 else yhat_plus[0],
+                'yhat_plus_1': yhat_plus[0],
+                'yhat_plus_2': yhat_plus[1],
+                'yhat_plus_3': yhat_plus[2],
+                'yhat_plus_4': yhat_plus[3],
+                'yhat_plus_5': yhat_plus[4],
+                'yhat_plus_6': yhat_plus[5],
+                'yhat_plus_7': yhat_plus[6],
             }
-            row.update(yhat_plus)
 
-            lag_df = pd.concat([lag_df, pd.DataFrame([row])], ignore_index=True)
+            lag_df = pd.concat([lag_df, pd.DataFrame([new_row])], ignore_index=True)
 
-        p_lgb_fut = lgb_final.predict(lag_df[feats].iloc[-future_days:])
+            X_pred = lag_df[feats].iloc[-1:].fillna(0)
 
+            y_pred = lgb_final.predict(X_pred)[0]
+
+            lag_df.at[lag_df.index[-1], 'y'] = y_pred
+
+        p_lgb_fut = lag_df['y'].iloc[-future_days:].values
+
+        # Evaluate Prophet CV MAE for weighting
         try:
             cv = cross_validation(m_full, initial='180 days', period='30 days',
                                   horizon='30 days', parallel=None)
@@ -191,41 +207,59 @@ for hosp in h_list:
             w_p = 1 / mae_prophet
             w_l = 1 / mae_lgb
             S = w_p + w_l
+            pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_l * l_test)
+
+if np.isinf(mae_prophet):
+            pred_test = l_test
+            method = "LGBM only"
+        else:
+            w_p = 1 / mae_prophet
+            w_l = 1 / mae_lgb
+            S = w_p + w_l
             pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_l * l_test) / S
-            method = f"Hybrid (P:{w_p/S:.2f},L:{w_l/S:.2f})"
+            method = f"Weighted Prophet + LGBM (weights: {w_p:.2f}, {w_l:.2f})"
 
-        mae_test = mean_absolute_error(test['y'], pred_test)
-        pred_fut = (w_p * p_prop_fut + w_l * p_lgb_fut) / S if not np.isinf(mae_prophet) else p_lgb_fut
+        # Weighted future forecast between Prophet base and LGBM rolling
+        if np.isinf(mae_prophet):
+            p_fut_final = p_lgb_fut
+        else:
+            p_fut_final = (w_p * p_prop_fut_base + w_l * p_lgb_fut) / S
 
+        # Show test plot
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual'))
-        fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines+markers', name='Pred (test)'))
-        fig.add_trace(go.Scatter(x=fut_pd['ds'], y=pred_fut, mode='lines+markers',
-                                 name='Forecast', line=dict(dash='dash')))
-        fig.update_layout(title=f"{hosp} • {tgt} | {method} | MAE: {mae_test:.2f}",
-                          xaxis_title="Date", yaxis_title=tgt, template="plotly_white")
+        fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual Test'))
+        fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines', name='Prediction Test'))
+        fig.update_layout(title=f"{hosp} - {tgt} Test Period Forecast ({method})",
+                          xaxis_title="Date", yaxis_title="Value")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("**Test-set Results**")
-        st.dataframe(pd.DataFrame({
-            "Date": test['ds'],
-            "Actual": test['y'],
-            "Predicted": pred_test,
-            "Error": np.abs(test['y'] - pred_test)
-        }).round(2), use_container_width=True)
+        # Show future forecast plot
+        future_dates = pd.date_range(start=df2['ds'].max() + pd.Timedelta(days=1), periods=future_days)
+        fut_df = pd.DataFrame({'ds': future_dates})
+        fut_df['Prophet Base'] = p_prop_fut_base
+        fut_df['LGBM Rolling'] = p_lgb_fut
+        fut_df['Weighted Forecast'] = p_fut_final
 
-        st.markdown("**Future Forecast**")
-        st.dataframe(pd.DataFrame({
-            "Date": fut_pd['ds'],
-            "Forecast": pred_fut
-        }).round(2), use_container_width=True)
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=fut_df['ds'], y=fut_df['Prophet Base'], mode='lines', name='Prophet Base'))
+        fig2.add_trace(go.Scatter(x=fut_df['ds'], y=fut_df['LGBM Rolling'], mode='lines', name='LGBM Rolling'))
+        fig2.add_trace(go.Scatter(x=fut_df['ds'], y=fut_df['Weighted Forecast'], mode='lines+markers', name='Weighted Forecast'))
+        fig2.update_layout(title=f"{hosp} - {tgt} Future Forecast ({future_days} days)",
+                           xaxis_title="Date", yaxis_title="Value")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        # Summary stats
+        st.write(f"MAE LightGBM CV: {mae_lgb:.3f}")
+        st.write(f"MAE Prophet CV: {mae_prophet if not np.isinf(mae_prophet) else 'Unavailable'}")
+        st.write(f"Forecast Method Used: {method}")
 
         results.append({
-            "Hospital": hosp,
-            "Target": tgt,
-            "Method": method,
-            "Test MAE": round(mae_test, 2)
+            'Hospital': hosp,
+            'Target': tgt,
+            'MAE_LGBM': mae_lgb,
+            'MAE_Prophet': mae_prophet,
+            'Method': method
         })
 
-st.subheader("Summary")
-st.dataframe(pd.DataFrame(results), use_container_width=True)
+st.sidebar.write("### Summary Results")
+st.sidebar.dataframe(pd.DataFrame(results))
