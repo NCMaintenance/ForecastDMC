@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 openpyxl
-lightgbm
+xgboost
 scikit-learn
 prophet
 plotly
