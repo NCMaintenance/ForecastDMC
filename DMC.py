@@ -49,11 +49,11 @@ def create_advanced_features(df, metric, ir_holidays):
     feature_df['quarter_cos'] = np.cos(2 * np.pi * feature_df['quarter'] / 4)
     
     # Advanced lag features
-    for lag in [1, 2, 3, 7, 14, 21, 30]:  # Various time horizons
+    for lag in [1, 2, 3, 7, 14]:  # Various time horizons
         feature_df[f'y_lag{lag}'] = feature_df['y'].shift(lag)
     
     # Rolling statistics (multiple windows)
-    for window in [3, 7, 14, 30, 60]:
+    for window in [3, 7, 14, 30]:
         feature_df[f'y_rolling_mean_{window}'] = feature_df['y'].rolling(window, min_periods=1).mean()
         feature_df[f'y_rolling_std_{window}'] = feature_df['y'].rolling(window, min_periods=1).std()
         feature_df[f'y_rolling_max_{window}'] = feature_df['y'].rolling(window, min_periods=1).max()
@@ -179,9 +179,9 @@ def train_xgboost_model(feature_df, all_hospital_features, metric_name):
     # Enhanced feature list
     base_features = ['year', 'month', 'day', 'dayofweek', 'hour', 'week_of_year', 'quarter', 'day_of_year']
     cyclical_features = ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'month_sin', 'month_cos', 'quarter_sin', 'quarter_cos']
-    lag_features = [f'y_lag{i}' for i in [1, 2, 3, 7, 14, 21, 30]]
+    lag_features = [f'y_lag{i}' for i in [1, 2, 3, 7, 14]]
     rolling_features = []
-    for window in [3, 7, 14, 30, 60]:
+    for window in [3, 7, 14, 30]:
         rolling_features.extend([f'y_rolling_mean_{window}', f'y_rolling_std_{window}', 
                                f'y_rolling_max_{window}', f'y_rolling_min_{window}', f'y_rolling_median_{window}'])
     
@@ -240,7 +240,7 @@ def train_xgboost_model(feature_df, all_hospital_features, metric_name):
     
     # XGBoost with optimized hyperparameters for time series
     xgb_model = xgb.XGBRegressor(
-        n_estimators=300,
+        n_estimators=30,
         max_depth=8,
         learning_rate=0.08,
         subsample=0.8,
