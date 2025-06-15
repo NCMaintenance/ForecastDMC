@@ -97,7 +97,15 @@ def create_advanced_features(df, metric, ir_holidays):
     prophet_df['weekend_evening'] = prophet_df['is_weekend'] * (prophet_df['hour'] >= 18).astype(int)
     prophet_df['monday_morning'] = prophet_df['is_monday'] * (prophet_df['hour'] <= 12).astype(int)
     
-    return prophet_df.dropna().reset_index()
+    # Clean up NaN values more thoroughly
+    prophet_df = prophet_df.replace([np.inf, -np.inf], np.nan)
+    prophet_df = prophet_df.dropna()
+    
+    # Fill any remaining NaN values in specific columns that might cause issues
+    numeric_cols = prophet_df.select_dtypes(include=[np.number]).columns
+    prophet_df[numeric_cols] = prophet_df[numeric_cols].fillna(0)
+    
+    return prophet_df.reset_index()
 
 @st.cache_data
 def create_all_hospitals_features(df_raw, target_cols, ir_holidays):
@@ -163,26 +171,42 @@ def train_enhanced_models(prophet_df, all_hospital_features, metric_name):
         prophet_df[system_features] = prophet_df[system_features].bfill().ffill()
         all_features.extend(system_features)
     
-    # Filter features that exist in the dataframe
-    available_features = [f for f in all_features if f in prophet_df.columns]
+    # Filter features that exist in the dataframe and have sufficient non-null values
+    available_features = []
+    for f in all_features:
+        if f in prophet_df.columns:
+            non_null_ratio = prophet_df[f].notna().sum() / len(prophet_df)
+            if non_null_ratio > 0.8:  # Keep features with at least 80% non-null values
+                available_features.append(f)
+    
+    # Ensure we have enough data after cleaning
+    if len(prophet_df) < 30:
+        raise ValueError(f"Insufficient data after cleaning: {len(prophet_df)} rows")
+    
+    # Final NaN check and cleaning for the features we'll use
+    feature_data = prophet_df[['ds', 'y'] + available_features].copy()
+    feature_data = feature_data.dropna()
+    
+    if len(feature_data) < 20:
+        raise ValueError("Too much data lost after removing NaN values")
     
     # Train Prophet
     prophet_model = Prophet(
         yearly_seasonality=True,
         weekly_seasonality=True,
         daily_seasonality=True,
-        seasonality_mode='multiplicative',
+        seasonality_mode='additive',  # Changed from multiplicative to avoid issues
         changepoint_prior_scale=0.05
     )
     
     for feature in available_features:
         prophet_model.add_regressor(feature)
     
-    prophet_model.fit(prophet_df[['ds', 'y'] + available_features])
+    prophet_model.fit(feature_data[['ds', 'y'] + available_features])
     
     # Train XGBoost with hyperparameter tuning
-    X = prophet_df[available_features]
-    y = prophet_df['y']
+    X = feature_data[available_features]
+    y = feature_data['y']
     
     # Scale features for better performance
     scaler = StandardScaler()
