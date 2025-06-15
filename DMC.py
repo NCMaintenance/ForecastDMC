@@ -2,231 +2,215 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from prophet import Prophet
-import holidays
 import xgboost as xgb
+import holidays
+from sklearn.metrics import mean_absolute_error
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from plotly.subplots import make_subplots
+import datetime
+import logging
 
-st.set_page_config(layout="wide", page_title="🏥 ED Hybrid Forecasting")
+# Suppress verbose logging
+logging.getLogger('prophet').setLevel(logging.WARNING)
+logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
 
-# Sidebar controls
-with st.sidebar:
-    st.title("🏥 ED Hybrid Forecasting")
-    uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
-    hospital_filter = None
-    run_button = st.button("Run Forecast")
+st.set_page_config(layout="wide", page_title="ED Metrics Hybrid Forecasting")
+st.title("🏥 Emergency Department Metrics Hybrid Forecasting (Prophet + XGBoost)")
 
-st.markdown("""
-# Emergency Department Hybrid Forecasting (Prophet + XGBoost)
+st.sidebar.title("Upload & Filter")
+uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=["xlsx", "xls"])
 
-Upload your ED data, select hospital, then run the hybrid forecast for 7 days ahead.  
-Forecasts are non-negative rounded bed counts.
-""")
+hospital_filter = None
+if uploaded_file:
+    df_temp = pd.read_excel(uploaded_file)
+    df_temp.columns = df_temp.columns.str.replace(" ", "")  # Remove spaces from all columns
+    
+    if 'Hospital' in df_temp.columns:
+        hospitals = sorted(df_temp['Hospital'].dropna().unique())
+        hospital_filter = st.sidebar.selectbox("Select Hospital", ["All"] + hospitals)
+    else:
+        st.sidebar.warning("No 'Hospital' column found.")
+
+run_button = st.sidebar.button("Run Forecast")
+
+# Define target metrics and their time suffixes (ensure no spaces)
+target_metrics_info = [
+    ('Tracker8am', '08:00:00'),
+    ('Tracker2pm', '14:00:00'),
+    ('Tracker8pm', '20:00:00'),
+    ('AdditionalCapacityOpenMorning', '08:00:00'),
+    ('TimeTotal_8am', '08:00:00'),
+    ('TimeTotal_2pm', '14:00:00'),
+    ('TimeTotal_8pm', '20:00:00'),
+]
+
+# Setup Ireland holidays including custom Feb 2025 bank holiday on 18th Feb 2025
+ie_holidays = holidays.Ireland(years=[2024, 2025])
+ie_holidays.append({'2025-02-18': "New Feb Bank Holiday"})
+
+def add_features(df):
+    df['year'] = df['ds'].dt.year
+    df['month'] = df['ds'].dt.month
+    df['day'] = df['ds'].dt.day
+    df['dayofweek'] = df['ds'].dt.dayofweek
+    df['hour'] = df['ds'].dt.hour
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+    df['is_holiday'] = df['ds'].dt.date.map(lambda x: 1 if x in ie_holidays else 0)
+    df['day_after_holiday'] = df['is_holiday'].shift(1).fillna(0)
+    return df
 
 if uploaded_file and run_button:
-    df = pd.read_excel(uploaded_file)
-    df.columns = df.columns.str.replace(" ", "")  # Remove spaces from columns
+    try:
+        df = pd.read_excel(uploaded_file)
+        df.columns = df.columns.str.replace(" ", "")
+        
+        if 'Date' not in df.columns:
+            st.error("Missing 'Date' column in data.")
+            st.stop()
+        
+        df['Date'] = pd.to_datetime(df['Date'])
+        
+        # Filter by hospital if selected
+        if hospital_filter and hospital_filter != "All":
+            df = df[df['Hospital'] == hospital_filter]
 
-    if "Date" not in df.columns or "Hospital" not in df.columns:
-        st.error("Your data must contain 'Date' and 'Hospital' columns.")
-        st.stop()
+        if df.empty:
+            st.warning("No data for selected hospital.")
+            st.stop()
 
-    df["Date"] = pd.to_datetime(df["Date"])
+        st.subheader("Filtered Data Preview")
+        st.dataframe(df.head())
 
-    hospitals = df["Hospital"].unique().tolist()
-    hospital_filter = st.sidebar.selectbox("Select Hospital", ["All"] + hospitals)
+        # Prepare dataframe for forecasts
+        forecast_horizon_days = 7
+        last_date = df['Date'].max()
+        
+        # Create future dataframe with all 3 times per day for next 7 days
+        future_dates = []
+        for day_offset in range(1, forecast_horizon_days + 1):
+            day = last_date + pd.Timedelta(days=day_offset)
+            for hour_str in ['08:00:00', '14:00:00', '20:00:00']:
+                dt_str = day.strftime('%Y-%m-%d') + ' ' + hour_str
+                future_dates.append(pd.to_datetime(dt_str))
+        future_df_base = pd.DataFrame({'ds': future_dates})
+        future_df_base = add_features(future_df_base)
 
-    if hospital_filter != "All":
-        df = df[df["Hospital"] == hospital_filter]
+        all_forecasts = []
+        all_metrics = []
 
-    st.write("### Raw Data Sample")
-    st.dataframe(df.head())
+        # Forecast loop per metric
+        for metric_name, time_suffix in target_metrics_info:
+            st.markdown(f"## Forecast: {metric_name}")
 
-    # Define target metrics and their associated forecast times
-    target_metrics_info = [
-        ("Tracker8am", "08:00:00"),
-        ("Tracker2pm", "14:00:00"),
-        ("Tracker8pm", "20:00:00"),
-        ("AdditionalCapacityOpenMorning", "09:00:00"),
-        ("TimeTotal_8am", "08:00:00"),
-        ("TimeTotal_2pm", "14:00:00"),
-        ("TimeTotal_8pm", "20:00:00")
-    ]
+            # Prepare historical data for this metric at specified time
+            temp = df.copy()
+            temp['ds'] = pd.to_datetime(temp['Date'].dt.strftime('%Y-%m-%d') + ' ' + time_suffix)
+            if metric_name not in temp.columns:
+                st.warning(f"Metric '{metric_name}' not found in data, skipping.")
+                continue
+            hist_df = temp[['ds', metric_name]].dropna()
+            hist_df = hist_df.rename(columns={metric_name: 'y'}).sort_values('ds')
 
-    # Setup Ireland holidays with St. Brigid's Day (first Monday in Feb)
-    years = list(df["Date"].dt.year.unique()) + [datetime.now().year + 1]
-    ie_holidays = holidays.country_holidays("IE", years=years)
-    for y in years:
-        feb1 = datetime(y, 2, 1)
-        st_brigid = feb1 + timedelta(days=(7 - feb1.weekday()) % 7)  # First Monday in Feb
-        ie_holidays[st_brigid] = "St. Brigid's Day"
+            if hist_df.empty or hist_df['y'].isna().all():
+                st.warning(f"No historical data for metric {metric_name}, skipping.")
+                continue
 
-    forecast_horizon = 7
-    results = {}
-    maes = {}
+            # Add features for Prophet + XGBoost
+            hist_df = add_features(hist_df)
+            hist_df['y_lag1'] = hist_df['y'].shift(1)
+            hist_df['y_rolling_mean_3'] = hist_df['y'].rolling(window=3).mean().shift(1)
+            hist_df = hist_df.dropna()
 
-    for metric, time_str in target_metrics_info:
-        if metric not in df.columns:
-            st.warning(f"Column '{metric}' missing in data, skipping.")
-            continue
+            # Prophet model
+            m = Prophet()
+            regressors = ['year', 'month', 'day', 'dayofweek', 'hour', 
+                          'hour_sin', 'hour_cos', 'is_holiday', 'day_after_holiday',
+                          'y_lag1', 'y_rolling_mean_3']
+            for reg in regressors:
+                m.add_regressor(reg)
+            m.fit(hist_df.rename(columns={'ds': 'ds', 'y': 'y'})[ ['ds', 'y'] + regressors ])
 
-        st.header(f"Forecast for {metric}")
+            # Prepare future data for this time suffix only
+            future = future_df_base[future_df_base['ds'].dt.strftime('%H:%M:%S') == time_suffix].copy()
 
-        # Prepare the dataframe for this metric
-        temp = df[["Date", metric]].copy()
-        temp["ds"] = pd.to_datetime(temp["Date"].astype(str) + " " + time_str)
-        temp = temp.dropna(subset=[metric])
-        temp = temp.rename(columns={metric: "y"})
-        temp["y"] = temp["y"].clip(lower=0).round()
+            # We set lag features for future from last known historical values:
+            last_y = hist_df['y'].iloc[-1]
+            last_y_lag1 = hist_df['y_lag1'].iloc[-1]
+            last_roll = hist_df['y_rolling_mean_3'].iloc[-1]
 
-        # Feature engineering
-        temp["year"] = temp["ds"].dt.year
-        temp["month"] = temp["ds"].dt.month
-        temp["day"] = temp["ds"].dt.day
-        temp["dayofweek"] = temp["ds"].dt.dayofweek
-        temp["hour"] = temp["ds"].dt.hour
-        temp["hour_sin"] = np.sin(2 * np.pi * temp["hour"] / 24)
-        temp["hour_cos"] = np.cos(2 * np.pi * temp["hour"] / 24)
-        temp["is_holiday"] = temp["ds"].dt.date.apply(lambda d: 1 if d in ie_holidays else 0)
-        temp["day_after_holiday"] = temp["ds"].dt.date.apply(lambda d: 1 if (d - timedelta(days=1)) in ie_holidays else 0)
-        temp["y_lag1"] = temp["y"].shift(1)
-        temp["y_rolling_mean"] = temp["y"].rolling(3).mean().shift(1)
-        temp = temp.dropna()
+            future['y_lag1'] = last_y
+            future['y_rolling_mean_3'] = last_roll
 
-        if temp.shape[0] < 10:
-            st.warning(f"Not enough data to forecast {metric} (need >= 10 rows after preprocessing).")
-            continue
+            forecast_prophet = m.predict(future)
 
-        # Define regressors/features
-        regressors = ["year", "month", "day", "dayofweek", "hour",
-                      "hour_sin", "hour_cos", "is_holiday", "day_after_holiday",
-                      "y_lag1", "y_rolling_mean"]
+            # XGBoost model
+            # Train on historical data
+            X_train = hist_df[regressors]
+            y_train = hist_df['y']
 
-        # --------------------------
-        # 1. Fit Prophet model
-        # --------------------------
-        m = Prophet()
-        for r in regressors:
-            m.add_regressor(r)
-        m.fit(temp[["ds", "y"] + regressors])
+            xgb_model = xgb.XGBRegressor(n_estimators=100, random_state=42)
+            xgb_model.fit(X_train, y_train)
 
-        # --------------------------
-        # 2. Fit XGBoost model
-        # --------------------------
-        X = temp[regressors]
-        y = temp["y"]
-        xgb_model = xgb.XGBRegressor(
-            n_estimators=100,
-            learning_rate=0.1,
-            max_depth=5,
-            objective="reg:squarederror",
-            random_state=42,
-        )
-        xgb_model.fit(X, y)
+            # Predict XGBoost on future
+            X_future = future[regressors]
+            xgb_pred = xgb_model.predict(X_future)
 
-        # --------------------------
-        # 3. Prepare future dataframe for 7 days
-        # --------------------------
-        last_date = temp["ds"].max()
-        future_dates = [last_date + timedelta(days=i) for i in range(1, forecast_horizon + 1)]
-        future = pd.DataFrame({"ds": [d.replace(hour=int(time_str[:2]), minute=0, second=0) for d in future_dates]})
+            # Hybrid forecast: average Prophet & XGBoost predictions
+            hybrid_pred = (forecast_prophet['yhat'].values + xgb_pred) / 2
+            # Round and clip negatives to zero
+            hybrid_pred = np.clip(np.round(hybrid_pred), 0, None).astype(int)
 
-        future["year"] = future["ds"].dt.year
-        future["month"] = future["ds"].dt.month
-        future["day"] = future["ds"].dt.day
-        future["dayofweek"] = future["ds"].dt.dayofweek
-        future["hour"] = future["ds"].dt.hour
-        future["hour_sin"] = np.sin(2 * np.pi * future["hour"] / 24)
-        future["hour_cos"] = np.cos(2 * np.pi * future["hour"] / 24)
-        future["is_holiday"] = future["ds"].dt.date.apply(lambda d: 1 if d in ie_holidays else 0)
-        future["day_after_holiday"] = future["ds"].dt.date.apply(lambda d: 1 if (d - timedelta(days=1)) in ie_holidays else 0)
+            # Build output DataFrame for forecast
+            forecast_df = future[['ds']].copy()
+            forecast_df['Prophet'] = np.round(forecast_prophet['yhat'], 0).astype(int)
+            forecast_df['XGBoost'] = np.round(xgb_pred, 0).astype(int)
+            forecast_df['Hybrid_Forecast'] = hybrid_pred
 
-        # Use last known lag and rolling mean values for features
-        future["y_lag1"] = temp["y"].iloc[-1]
-        future["y_rolling_mean"] = temp["y_rolling_mean"].iloc[-1]
+            # Evaluate MAE on training set by predicting training data for XGBoost & Prophet
+            prophet_train_pred = m.predict(hist_df)[ 'yhat' ]
+            xgb_train_pred = xgb_model.predict(X_train)
+            hybrid_train_pred = (prophet_train_pred + xgb_train_pred) / 2
 
-        # --------------------------
-        # 4. Predict with Prophet
-        # --------------------------
-        prophet_forecast = m.predict(future)
-        prophet_forecast["yhat"] = prophet_forecast["yhat"].clip(lower=0).round()
+            mae_prophet = mean_absolute_error(hist_df['y'], prophet_train_pred)
+            mae_xgb = mean_absolute_error(hist_df['y'], xgb_train_pred)
+            mae_hybrid = mean_absolute_error(hist_df['y'], hybrid_train_pred)
 
-        # --------------------------
-        # 5. Predict with XGBoost
-        # --------------------------
-        xgb_pred = xgb_model.predict(future[regressors])
-        xgb_pred = np.clip(np.round(xgb_pred), 0, None)
+            st.markdown(f"**MAE on training data:**")
+            st.write(f"Prophet: {mae_prophet:.2f}, XGBoost: {mae_xgb:.2f}, Hybrid: {mae_hybrid:.2f}")
 
-        # --------------------------
-        # 6. Hybrid forecast: weighted average
-        # --------------------------
-        w_prophet = 0.6
-        w_xgb = 0.4
-        hybrid_pred = w_prophet * prophet_forecast["yhat"] + w_xgb * xgb_pred
-        hybrid_pred = np.clip(np.round(hybrid_pred), 0, None)
+            # Plot results: last 30 days + forecast
+            recent_hist = hist_df[['ds', 'y']].copy()
+            recent_hist = recent_hist[recent_hist['ds'] >= (last_date - pd.Timedelta(days=30))]
 
-        # Prepare output DataFrame
-        forecast_df = future[["ds"]].copy()
-        forecast_df["Prophet"] = prophet_forecast["yhat"].values
-        forecast_df["XGBoost"] = xgb_pred
-        forecast_df["Hybrid"] = hybrid_pred.astype(int)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=recent_hist['ds'], y=recent_hist['y'],
+                                     mode='lines+markers', name='Historical'))
 
-        # --------------------------
-        # 7. Calculate MAE on last 7 days (backtest)
-        # --------------------------
-        if temp.shape[0] > 14:
-            test_data = temp.iloc[-7:]
-            test_X = test_data[regressors]
-            test_y = test_data["y"]
+            fig.add_trace(go.Scatter(x=forecast_df['ds'], y=forecast_df['Hybrid_Forecast'],
+                                     mode='lines+markers', name='Hybrid Forecast'))
 
-            pred_prophet_back = m.predict(test_data[["ds"] + regressors])["yhat"].clip(lower=0).round()
-            pred_xgb_back = xgb_model.predict(test_X)
-            pred_xgb_back = np.clip(np.round(pred_xgb_back), 0, None)
+            fig.update_layout(title=f"{metric_name} - Last 30 Days + 7-Day Forecast",
+                              xaxis_title='Date',
+                              yaxis_title='Beds',
+                              height=400)
 
-            hybrid_back = w_prophet * pred_prophet_back + w_xgb * pred_xgb_back
-            hybrid_back = np.clip(np.round(hybrid_back), 0, None)
+            st.plotly_chart(fig, use_container_width=True)
 
-            mae_prophet = np.mean(np.abs(test_y - pred_prophet_back))
-            mae_xgb = np.mean(np.abs(test_y - pred_xgb_back))
-            mae_hybrid = np.mean(np.abs(test_y - hybrid_back))
+            st.markdown("### Forecast Table")
+            st.dataframe(forecast_df.rename(columns={'ds': 'Date'}).set_index('Date'))
 
-            maes[metric] = {
-                "Prophet MAE": round(mae_prophet, 2),
-                "XGBoost MAE": round(mae_xgb, 2),
-                "Hybrid MAE": round(mae_hybrid, 2),
-            }
-        else:
-            maes[metric] = {
-                "Prophet MAE": "N/A",
-                "XGBoost MAE": "N/A",
-                "Hybrid MAE": "N/A",
-            }
+            all_forecasts.append(forecast_df.assign(Metric=metric_name))
+            all_metrics.append({
+                'Metric': metric_name,
+                'MAE_Prophet': mae_prophet,
+                'MAE_XGBoost': mae_xgb,
+                'MAE_Hybrid': mae_hybrid
+            })
 
-        results[metric] = forecast_df
+        if all_metrics:
+            st.markdown("## Summary of MAE for all metrics")
+            st.table(pd.DataFrame(all_metrics).set_index('Metric'))
 
-        # --------------------------
-        # 8. Plot results
-        # --------------------------
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=forecast_df["ds"], y=forecast_df["Prophet"],
-            mode="lines+markers", name="Prophet Forecast"
-        ))
-        fig.add_trace(go.Scatter(
-            x=forecast_df["ds"], y=forecast_df["XGBoost"],
-            mode="lines+markers", name="XGBoost Forecast"
-        ))
-        fig.add_trace(go.Scatter(
-            x=forecast_df["ds"], y=forecast_df["Hybrid"],
-            mode="lines+markers", name="Hybrid Forecast", line=dict(width=3)
-        ))
-        fig.update_layout(title=f"Forecast Comparison for {metric}",
-                          xaxis_title="Date",
-                          yaxis_title="Beds (Rounded, Non-negative)")
-
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(forecast_df.rename(columns={"ds": "Date"}))
-        st.write("MAE (last 7 days backtest):", maes[metric])
-
-else:
-    st.info("Upload your Excel file and press 'Run Forecast' to start.")
+    except Exception as e:
+        st.error(f"Error processing file: {e}")
