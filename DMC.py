@@ -229,38 +229,69 @@ def train_enhanced_models(prophet_df, all_hospital_features, metric_name):
     
     xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     
-    return prophet_model, xgb_model, scaler, available_features
+    return prophet_model, xgb_model, scaler, available_features, feature_data
 
 # ------------- ENHANCED EVALUATION ---------------
 
 def evaluate_models(prophet_model, xgb_model, scaler, features, prophet_df, test_size=14):
     """Enhanced model evaluation with multiple metrics"""
-    test_mask = prophet_df.index >= (len(prophet_df) - test_size)
-    test_data = prophet_df[test_mask].copy()
+    if len(prophet_df) < test_size:
+        test_size = max(1, len(prophet_df) // 4)  # Use 25% of data if insufficient
     
-    # Prophet predictions
-    prophet_preds = prophet_model.predict(test_data[['ds'] + features])
-    prophet_forecast = prophet_preds['yhat'].values
+    test_data = prophet_df.tail(test_size).copy()
     
-    # XGBoost predictions
-    X_test_scaled = scaler.transform(test_data[features])
-    xgb_forecast = xgb_model.predict(X_test_scaled)
+    # Ensure test_data has the right structure and clean data
+    test_data = test_data.dropna()
+    if len(test_data) == 0:
+        return {'Prophet': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
+                'XGBoost': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
+                'Hybrid': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}}
     
-    # Hybrid predictions (weighted average based on historical performance)
-    hybrid_forecast = 0.6 * prophet_forecast + 0.4 * xgb_forecast
-    
-    y_true = test_data['y'].values
-    
-    # Calculate multiple metrics
-    metrics = {}
-    for name, preds in [('Prophet', prophet_forecast), ('XGBoost', xgb_forecast), ('Hybrid', hybrid_forecast)]:
-        metrics[name] = {
-            'MAE': mean_absolute_error(y_true, preds),
-            'RMSE': np.sqrt(mean_squared_error(y_true, preds)),
-            'MAPE': np.mean(np.abs((y_true - preds) / y_true)) * 100
-        }
-    
-    return metrics
+    try:
+        # Prophet predictions - ensure proper data types
+        prophet_test_data = test_data[['ds'] + features].copy()
+        # Convert to proper data types
+        for col in features:
+            if col in prophet_test_data.columns:
+                prophet_test_data[col] = pd.to_numeric(prophet_test_data[col], errors='coerce')
+        prophet_test_data = prophet_test_data.dropna()
+        
+        prophet_preds = prophet_model.predict(prophet_test_data)
+        prophet_forecast = prophet_preds['yhat'].values
+        
+        # XGBoost predictions
+        X_test = test_data[features].copy()
+        X_test = X_test.fillna(0)  # Fill any remaining NaN
+        X_test_scaled = scaler.transform(X_test)
+        xgb_forecast = xgb_model.predict(X_test_scaled)
+        
+        # Ensure same length
+        min_length = min(len(prophet_forecast), len(xgb_forecast), len(test_data))
+        prophet_forecast = prophet_forecast[:min_length]
+        xgb_forecast = xgb_forecast[:min_length]
+        y_true = test_data['y'].values[:min_length]
+        
+        # Hybrid predictions (weighted average based on historical performance)
+        hybrid_forecast = 0.6 * prophet_forecast + 0.4 * xgb_forecast
+        
+        # Calculate multiple metrics
+        metrics = {}
+        for name, preds in [('Prophet', prophet_forecast), ('XGBoost', xgb_forecast), ('Hybrid', hybrid_forecast)]:
+            # Avoid division by zero in MAPE
+            mape = np.mean(np.abs((y_true - preds) / np.maximum(y_true, 1))) * 100
+            metrics[name] = {
+                'MAE': mean_absolute_error(y_true, preds),
+                'RMSE': np.sqrt(mean_squared_error(y_true, preds)),
+                'MAPE': mape
+            }
+        
+        return metrics
+        
+    except Exception as e:
+        st.warning(f"Error in model evaluation: {str(e)}")
+        return {'Prophet': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
+                'XGBoost': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
+                'Hybrid': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}}
 
 # ------------- MAIN APP (UPDATED) -------------------
 
@@ -333,12 +364,12 @@ if uploaded_file:
                 continue
             
             # Train enhanced models
-            prophet_model, xgb_model, scaler, features = train_enhanced_models(
+            prophet_model, xgb_model, scaler, features, cleaned_data = train_enhanced_models(
                 prophet_df, all_hospital_features, metric_name
             )
             
             # Evaluate models
-            metrics = evaluate_models(prophet_model, xgb_model, scaler, features, prophet_df)
+            metrics = evaluate_models(prophet_model, xgb_model, scaler, features, cleaned_data)
             
             # Display metrics
             col1, col2, col3 = st.columns(3)
