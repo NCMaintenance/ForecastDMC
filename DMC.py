@@ -1,152 +1,32 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
-from prophet import Prophet
 import xgboost as xgb
-import holidays
+import streamlit as st
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import warnings
-warnings.filterwarnings('ignore')
+from utils import (
+    create_all_hospitals_features,
+    create_advanced_features,
+    load_metric_data,
+    METRICS
+)
 
-# ------------- ENHANCED FEATURE ENGINEERING ---------------
-
-@st.cache_data
-def get_ireland_holidays(years):
-    ir_holidays = holidays.Ireland(years=years)
-    # Add custom Feb holiday for example (Feb 15)
-    for year in years:
-        ir_holidays[f'{year}-02-15'] = "Custom Feb Bank Holiday"
-    return ir_holidays
+st.set_page_config(layout="wide")
+st.title("XGBoost-Only Forecast App")
 
 @st.cache_data
-def create_advanced_features(df, metric, ir_holidays):
-    """Enhanced feature engineering with more sophisticated patterns"""
-    temp_df = df.copy()
-    temp_df['ds'] = pd.to_datetime(temp_df['Date'])
-    prophet_df = temp_df[['ds', metric]].rename(columns={metric: 'y'}).dropna().set_index('ds')
-    
-    # Temporal features
-    prophet_df['year'] = prophet_df.index.year
-    prophet_df['month'] = prophet_df.index.month
-    prophet_df['day'] = prophet_df.index.day
-    prophet_df['dayofweek'] = prophet_df.index.dayofweek
-    prophet_df['hour'] = prophet_df.index.hour
-    prophet_df['week_of_year'] = prophet_df.index.isocalendar().week
-    
-    # Cyclical encoding (better than sine/cosine alone)
-    prophet_df['hour_sin'] = np.sin(2 * np.pi * prophet_df['hour'] / 24)
-    prophet_df['hour_cos'] = np.cos(2 * np.pi * prophet_df['hour'] / 24)
-    prophet_df['dow_sin'] = np.sin(2 * np.pi * prophet_df['dayofweek'] / 7)
-    prophet_df['dow_cos'] = np.cos(2 * np.pi * prophet_df['dayofweek'] / 7)
-    prophet_df['month_sin'] = np.sin(2 * np.pi * prophet_df['month'] / 12)
-    prophet_df['month_cos'] = np.cos(2 * np.pi * prophet_df['month'] / 12)
-    
-    # Advanced lag features
-    for lag in [1, 2, 3, 7, 14]:  # 1-3 days, 1-2 weeks
-        prophet_df[f'y_lag{lag}'] = prophet_df['y'].shift(lag)
-    
-    # Rolling statistics (multiple windows)
-    for window in [3, 7, 14, 30]:
-        prophet_df[f'y_rolling_mean_{window}'] = prophet_df['y'].rolling(window).mean().shift(1)
-        prophet_df[f'y_rolling_std_{window}'] = prophet_df['y'].rolling(window).std().shift(1)
-        prophet_df[f'y_rolling_max_{window}'] = prophet_df['y'].rolling(window).max().shift(1)
-        prophet_df[f'y_rolling_min_{window}'] = prophet_df['y'].rolling(window).min().shift(1)
-    
-    # Percentage changes and volatility
-    prophet_df['y_pct_change_1d'] = prophet_df['y'].pct_change(1)
-    prophet_df['y_pct_change_7d'] = prophet_df['y'].pct_change(7)
-    prophet_df['y_volatility_7d'] = prophet_df['y'].rolling(7).std() / prophet_df['y'].rolling(7).mean()
-    
-    # Holiday effects (more sophisticated)
-    holiday_dates = set(pd.to_datetime(list(ir_holidays.keys())).date)
-    
-    # Ensure we can extract dates from the index
-    if hasattr(prophet_df.index, 'date'):
-        date_series = pd.Series(prophet_df.index.date, index=prophet_df.index)
-    else:
-        date_series = pd.Series([d.date() for d in prophet_df.index], index=prophet_df.index)
-    
-    prophet_df['is_holiday'] = date_series.map(lambda x: 1 if x in holiday_dates else 0)
-    prophet_df['days_since_holiday'] = 0
-    prophet_df['days_until_holiday'] = 0
-    
-    # Calculate days to/from holidays
-    holiday_dates_dt = pd.to_datetime(list(holiday_dates))
-    for idx in prophet_df.index:
-        past_holidays = holiday_dates_dt[holiday_dates_dt <= idx]
-        future_holidays = holiday_dates_dt[holiday_dates_dt > idx]
-        
-        if len(past_holidays) > 0:
-            prophet_df.loc[idx, 'days_since_holiday'] = (idx - past_holidays.max()).days
-        if len(future_holidays) > 0:
-            prophet_df.loc[idx, 'days_until_holiday'] = (future_holidays.min() - idx).days
-    
-    # Weekend/weekday patterns
-    prophet_df['is_weekend'] = (prophet_df['dayofweek'] >= 5).astype(int)
-    prophet_df['is_monday'] = (prophet_df['dayofweek'] == 0).astype(int)
-    prophet_df['is_friday'] = (prophet_df['dayofweek'] == 4).astype(int)
-    
-    # Seasonal patterns
-    prophet_df['is_summer'] = prophet_df['month'].isin([6, 7, 8]).astype(int)
-    prophet_df['is_winter'] = prophet_df['month'].isin([12, 1, 2]).astype(int)
-    
-    # Interaction features
-    prophet_df['weekend_evening'] = prophet_df['is_weekend'] * (prophet_df['hour'] >= 18).astype(int)
-    prophet_df['monday_morning'] = prophet_df['is_monday'] * (prophet_df['hour'] <= 12).astype(int)
-    
-    # Clean up NaN values more thoroughly
-    prophet_df = prophet_df.replace([np.inf, -np.inf], np.nan)
-    prophet_df = prophet_df.dropna()
-    
-    # Fill any remaining NaN values in specific columns that might cause issues
-    numeric_cols = prophet_df.select_dtypes(include=[np.number]).columns
-    prophet_df[numeric_cols] = prophet_df[numeric_cols].fillna(0)
-    
-    return prophet_df.reset_index()
+
+def load_all_hospitals_features():
+    all_features = {}
+    for metric in METRICS:
+        df = load_metric_data(metric)
+        if df is not None:
+            all_features[metric] = create_all_hospitals_features(df)
+    return all_features
 
 @st.cache_data
-def create_all_hospitals_features(df_raw, target_cols, ir_holidays):
-    """Create features using all hospitals data for better trend capture"""
-    # Aggregate all hospitals data
-    df_all = df_raw.groupby('Date')[target_cols].sum().reset_index()
-    
-    all_hospital_features = {}
-    for metric in target_cols:
-        if metric in df_all.columns:
-            # Create time series with hourly granularity
-            expanded_data = []
-            for _, row in df_all.iterrows():
-                for hour in [8, 14, 20]:
-                    expanded_data.append({
-                        'Date': row['Date'],
-                        'hour': hour,
-                        metric: row[metric]
-                    })
-            
-            expanded_df = pd.DataFrame(expanded_data)
-            expanded_df['ds'] = pd.to_datetime(expanded_df['Date'].astype(str) + ' ' + 
-                                            expanded_df['hour'].astype(str).str.zfill(2) + ':00:00')
-            
-            # Create features for this metric
-            temp_df = expanded_df[['ds', metric]].rename(columns={metric: 'y'}).set_index('ds')
-            
-            # Add system-wide trend features
-            temp_df['system_trend_7d'] = temp_df['y'].rolling(7*3).mean()  # 7 days * 3 times per day
-            temp_df['system_trend_30d'] = temp_df['y'].rolling(30*3).mean()
-            temp_df['system_capacity_utilization'] = temp_df['y'] / temp_df['y'].rolling(90*3).max()
-            
-            all_hospital_features[metric] = temp_df.reset_index()
-    
-    return all_hospital_features
 
-@st.cache_data
-def train_enhanced_models(prophet_df, all_hospital_features, metric_name):
-    """Train both Prophet and XGBoost with enhanced features"""
-    
-    # Enhanced feature list
+def train_xgboost_model(prophet_df, all_hospital_features, metric_name):
     base_features = ['year', 'month', 'day', 'dayofweek', 'hour', 'week_of_year']
     cyclical_features = ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'month_sin', 'month_cos']
     lag_features = [f'y_lag{i}' for i in [1, 2, 3, 7, 14]]
@@ -158,61 +38,33 @@ def train_enhanced_models(prophet_df, all_hospital_features, metric_name):
     holiday_features = ['is_holiday', 'days_since_holiday', 'days_until_holiday']
     pattern_features = ['is_weekend', 'is_monday', 'is_friday', 'is_summer', 'is_winter']
     interaction_features = ['weekend_evening', 'monday_morning']
-    
-    all_features = (base_features + cyclical_features + lag_features + rolling_features + 
-                   pct_features + holiday_features + pattern_features + interaction_features)
-    
-    # Add system-wide features if available
+
+    all_features = base_features + cyclical_features + lag_features + rolling_features + \
+                   pct_features + holiday_features + pattern_features + interaction_features
+
     if metric_name in all_hospital_features:
         system_features = ['system_trend_7d', 'system_trend_30d', 'system_capacity_utilization']
-        # Merge system features
         system_df = all_hospital_features[metric_name]
         prophet_df = prophet_df.merge(system_df[['ds'] + system_features], on='ds', how='left')
         prophet_df[system_features] = prophet_df[system_features].bfill().ffill()
         all_features.extend(system_features)
-    
-    # Filter features that exist in the dataframe and have sufficient non-null values
-    available_features = []
-    for f in all_features:
-        if f in prophet_df.columns:
-            non_null_ratio = prophet_df[f].notna().sum() / len(prophet_df)
-            if non_null_ratio > 0.8:  # Keep features with at least 80% non-null values
-                available_features.append(f)
-    
-    # Ensure we have enough data after cleaning
-    if len(prophet_df) < 30:
-        raise ValueError(f"Insufficient data after cleaning: {len(prophet_df)} rows")
-    
-    # Final NaN check and cleaning for the features we'll use
-    feature_data = prophet_df[['ds', 'y'] + available_features].copy()
-    feature_data = feature_data.dropna()
-    
+
+    available_features = [f for f in all_features if f in prophet_df.columns and prophet_df[f].notna().sum() > 0.8 * len(prophet_df)]
+    feature_data = prophet_df[['ds', 'y'] + available_features].copy().dropna()
+
     if len(feature_data) < 20:
-        raise ValueError("Too much data lost after removing NaN values")
-    
-    # Train Prophet
-    prophet_model = Prophet(
-        yearly_seasonality=True,
-        weekly_seasonality=True,
-        daily_seasonality=True,
-        seasonality_mode='additive',  # Changed from multiplicative to avoid issues
-        changepoint_prior_scale=0.05
-    )
-    
-    for feature in available_features:
-        prophet_model.add_regressor(feature)
-    
-    prophet_model.fit(feature_data[['ds', 'y'] + available_features])
-    
-    # Train XGBoost with hyperparameter tuning
+        raise ValueError("Too much data lost after dropping NaN values")
+
     X = feature_data[available_features]
     y = feature_data['y']
-    
-    # Scale features for better performance
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    
-    xgb_model = xgb.XGBRegressor(
+
+    train_size = int(0.8 * len(X_scaled))
+    X_train, X_val = X_scaled[:train_size], X_scaled[train_size:]
+    y_train, y_val = y[:train_size], y[train_size:]
+
+    model = xgb.XGBRegressor(
         n_estimators=200,
         max_depth=6,
         learning_rate=0.1,
@@ -221,177 +73,52 @@ def train_enhanced_models(prophet_df, all_hospital_features, metric_name):
         random_state=42,
         early_stopping_rounds=20
     )
-    
-    # Split for validation
-    train_size = int(0.8 * len(X_scaled))
-    X_train, X_val = X_scaled[:train_size], X_scaled[train_size:]
-    y_train, y_val = y[:train_size], y[train_size:]
-    
-    xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-    
-    return prophet_model, xgb_model, scaler, available_features, feature_data
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
-# ------------- ENHANCED EVALUATION ---------------
+    return model, scaler, available_features, feature_data
 
-def evaluate_models(prophet_model, xgb_model, scaler, features, prophet_df, test_size=14):
-    """Enhanced model evaluation with multiple metrics"""
-    if len(prophet_df) < test_size:
-        test_size = max(1, len(prophet_df) // 4)  # Use 25% of data if insufficient
-    
-    test_data = prophet_df.tail(test_size).copy()
-    
-    # Ensure test_data has the right structure and clean data
-    test_data = test_data.dropna()
-    if len(test_data) == 0:
-        return {'Prophet': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
-                'XGBoost': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
-                'Hybrid': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}}
-    
+def evaluate_xgboost_model(model, scaler, features, df, test_size=14):
+    df = df.dropna()
+    if len(df) < test_size:
+        test_size = max(1, len(df) // 4)
+    test_data = df.tail(test_size).copy()
+    if test_data.empty:
+        return {'XGBoost': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}}
+
+    X_test = test_data[features].copy().fillna(0)
+    X_test_scaled = scaler.transform(X_test)
+    y_true = test_data['y'].values
+    y_pred = model.predict(X_test_scaled)
+
+    mape = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1))) * 100
+    return {
+        'XGBoost': {
+            'MAE': mean_absolute_error(y_true, y_pred),
+            'RMSE': np.sqrt(mean_squared_error(y_true, y_pred)),
+            'MAPE': mape
+        }
+    }
+
+# --- Sidebar and user input ---
+metric_name = st.sidebar.selectbox("Select a metric", METRICS)
+df = load_metric_data(metric_name)
+if df is None:
+    st.error("Failed to load data for selected metric.")
+    st.stop()
+
+hospital_id = st.sidebar.selectbox("Select a hospital", df['hospital_id'].unique())
+df_filtered = df[df['hospital_id'] == hospital_id].copy()
+prophet_df = create_advanced_features(df_filtered)
+
+if st.sidebar.button("Run Enhanced Forecast"):
+    all_hospital_features = load_all_hospitals_features()
+
     try:
-        # Prophet predictions - ensure proper data types
-        prophet_test_data = test_data[['ds'] + features].copy()
-        # Convert to proper data types
-        for col in features:
-            if col in prophet_test_data.columns:
-                prophet_test_data[col] = pd.to_numeric(prophet_test_data[col], errors='coerce')
-        prophet_test_data = prophet_test_data.dropna()
-        
-        prophet_preds = prophet_model.predict(prophet_test_data)
-        prophet_forecast = prophet_preds['yhat'].values
-        
-        # XGBoost predictions
-        X_test = test_data[features].copy()
-        X_test = X_test.fillna(0)  # Fill any remaining NaN
-        X_test_scaled = scaler.transform(X_test)
-        xgb_forecast = xgb_model.predict(X_test_scaled)
-        
-        # Ensure same length
-        min_length = min(len(prophet_forecast), len(xgb_forecast), len(test_data))
-        prophet_forecast = prophet_forecast[:min_length]
-        xgb_forecast = xgb_forecast[:min_length]
-        y_true = test_data['y'].values[:min_length]
-        
-        # Hybrid predictions (weighted average based on historical performance)
-        hybrid_forecast = 0.6 * prophet_forecast + 0.4 * xgb_forecast
-        
-        # Calculate multiple metrics
-        metrics = {}
-        for name, preds in [('Prophet', prophet_forecast), ('XGBoost', xgb_forecast), ('Hybrid', hybrid_forecast)]:
-            # Avoid division by zero in MAPE
-            mape = np.mean(np.abs((y_true - preds) / np.maximum(y_true, 1))) * 100
-            metrics[name] = {
-                'MAE': mean_absolute_error(y_true, preds),
-                'RMSE': np.sqrt(mean_squared_error(y_true, preds)),
-                'MAPE': mape
-            }
-        
-        return metrics
-        
+        model, scaler, features, cleaned_data = train_xgboost_model(prophet_df, all_hospital_features, metric_name)
+        metrics = evaluate_xgboost_model(model, scaler, features, cleaned_data)
+
+        st.subheader("Forecast Accuracy")
+        st.json(metrics)
+
     except Exception as e:
-        st.warning(f"Error in model evaluation: {str(e)}")
-        return {'Prophet': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
-                'XGBoost': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, 
-                'Hybrid': {'MAE': 0, 'RMSE': 0, 'MAPE': 0}}
-
-# ------------- MAIN APP (UPDATED) -------------------
-
-st.set_page_config(layout="wide", page_title="Enhanced ED Forecasting")
-st.title("🏥 Enhanced Emergency Department Forecasting")
-
-st.sidebar.header("Upload & Settings")
-uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=['xlsx', 'xls'])
-
-if uploaded_file:
-    df_raw = pd.read_excel(uploaded_file)
-    
-    # Data preprocessing
-    if df_raw.shape[1] > 1:
-        df_raw = df_raw.iloc[:, 1:]
-    
-    if 'Date' not in df_raw.columns or 'Hospital' not in df_raw.columns:
-        st.sidebar.error("Excel must include 'Date' and 'Hospital' columns.")
-        st.stop()
-    
-    df_raw['Date'] = pd.to_datetime(df_raw['Date'])
-    
-    # Metrics configuration
-    target_metrics_info = [
-        ('Tracker8am', '08:00:00'),
-        ('Tracker2pm', '14:00:00'),
-        ('Tracker8pm', '20:00:00'),
-        ('AdditionalCapacityOpenMorning', '08:00:00'),
-        ('TimeTotal_8am', '08:00:00'),
-        ('TimeTotal_2pm', '14:00:00'),
-        ('TimeTotal_8pm', '20:00:00'),
-    ]
-    target_cols = [m[0] for m in target_metrics_info if m[0] in df_raw.columns]
-    
-    hospitals = ['All Hospitals'] + sorted(df_raw['Hospital'].unique())
-    selected_hospital = st.sidebar.selectbox("Select Hospital", hospitals)
-    
-    use_all_hospitals_trend = st.sidebar.checkbox("Use All Hospitals Trend", value=True, 
-                                                 help="Include system-wide trends for better forecasting")
-    
-    if st.sidebar.button("Run Enhanced Forecast"):
-        # Get holidays
-        years = list(df_raw['Date'].dt.year.unique())
-        ir_holidays = holidays.Ireland(years=years)
-        
-        # Create all hospitals features if requested
-        all_hospital_features = {}
-        if use_all_hospitals_trend:
-            all_hospital_features = create_all_hospitals_features(df_raw, target_cols, ir_holidays)
-        
-        # Filter data
-        if selected_hospital == "All Hospitals":
-            df_filtered = df_raw.groupby('Date')[target_cols].sum().reset_index()
-        else:
-            df_filtered = df_raw[df_raw['Hospital'] == selected_hospital].copy()
-        
-        st.header(f"Enhanced Forecast Results for {selected_hospital}")
-        
-        for metric_name, time_suffix in target_metrics_info:
-            if metric_name not in df_filtered.columns:
-                continue
-            
-            st.subheader(f"📊 {metric_name}")
-            
-            # Create enhanced features
-            prophet_df = create_advanced_features(df_filtered, metric_name, ir_holidays)
-            
-            if len(prophet_df) < 50:  # Need sufficient data
-                st.warning(f"Insufficient data for {metric_name} (need at least 50 records)")
-                continue
-            
-            # Train enhanced models
-            prophet_model, xgb_model, scaler, features, cleaned_data = train_enhanced_models(
-                prophet_df, all_hospital_features, metric_name
-            )
-            
-            # Evaluate models
-            metrics = evaluate_models(prophet_model, xgb_model, scaler, features, cleaned_data)
-            
-            # Display metrics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Prophet MAE", f"{metrics['Prophet']['MAE']:.2f}")
-                st.metric("Prophet RMSE", f"{metrics['Prophet']['RMSE']:.2f}")
-            with col2:
-                st.metric("XGBoost MAE", f"{metrics['XGBoost']['MAE']:.2f}")
-                st.metric("XGBoost RMSE", f"{metrics['XGBoost']['RMSE']:.2f}")
-            with col3:
-                st.metric("Hybrid MAE", f"{metrics['Hybrid']['MAE']:.2f}")
-                st.metric("Hybrid RMSE", f"{metrics['Hybrid']['RMSE']:.2f}")
-            
-            # Feature importance for XGBoost
-            if hasattr(xgb_model, 'feature_importances_'):
-                importance_df = pd.DataFrame({
-                    'Feature': features,
-                    'Importance': xgb_model.feature_importances_
-                }).sort_values('Importance', ascending=False).head(10)
-                
-                st.subheader("Top 10 Most Important Features")
-                st.bar_chart(importance_df.set_index('Feature')['Importance'])
-
-else:
-    st.info("Please upload an Excel file to begin forecasting.")
+        st.error(f"Training failed: {e}")
