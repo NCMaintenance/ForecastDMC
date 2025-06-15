@@ -54,7 +54,12 @@ if df is None:
 hospitals = sorted(df['Hospital'].unique())
 sel_hosp = st.sidebar.selectbox("🏨 Hospital", ["All"] + hospitals)
 sel_target = st.sidebar.selectbox("🎯 Target", ["All"] + targets)
-future_days = st.sidebar.slider("⏳ Forecast horizon (days ahead)", 7, 90, 30)
+future_days = 7  # Fixed at 7 days for the forecast
+run_forecast = st.sidebar.button("▶️ Run Forecast")
+
+if not run_forecast:
+    st.info("ℹ️ Configure your forecast parameters in the sidebar and click 'Run Forecast'.")
+    st.stop()
 
 # --- Helper Functions ---
 def calculate_optimal_lookback(df_length):
@@ -135,11 +140,30 @@ for hosp in selected_hospitals:
         feature_cols = [col for col in train_df.columns if col not in ['Date', 'y']]
         lgb_model.fit(train_df[feature_cols], train_df['y'])
         
-        # Predictions
+        # Predictions for Test Data
         lgb_pred = lgb_model.predict(test_df[feature_cols])
         mse = mean_squared_error(test_df['y'], lgb_pred)
-        rmse = np.sqrt(mse)  # Fixed RMSE calculation
+        rmse = np.sqrt(mse)  # RMSE calculation
         mae = mean_absolute_error(test_df['y'], lgb_pred)
+        
+        # Ensure predictions are non-negative and rounded
+        lgb_pred = np.maximum(0, np.round(lgb_pred, 2))
+        
+        # Forecast for the next 7 days
+        future_dates = pd.date_range(start=df_target['Date'].max() + timedelta(days=1), periods=future_days)
+        future_features = pd.DataFrame({'Date': future_dates})
+        for col in feature_cols:
+            if col.endswith('_lag_1'):
+                future_features[col] = df_target[col].iloc[-1]
+            else:
+                future_features[col] = 0  # Default values for simplicity
+        
+        future_pred = lgb_model.predict(future_features[feature_cols])
+        future_pred = np.maximum(0, np.round(future_pred, 2))  # Clamp to non-negative values
+        
+        # Confidence intervals (assume ±10% for simplicity)
+        lower_bound = np.maximum(0, np.round(future_pred * 0.9, 2))
+        upper_bound = np.round(future_pred * 1.1, 2)
         
         # Results Visualization
         fig = go.Figure()
@@ -147,6 +171,16 @@ for hosp in selected_hospitals:
         fig.add_trace(go.Scatter(x=test_df['Date'], y=lgb_pred, mode='lines+markers', name='Predicted'))
         fig.update_layout(title=f"Forecast for {target} ({hosp})", xaxis_title="Date", yaxis_title="Value")
         st.plotly_chart(fig)
+        
+        # Display Future Forecast Table
+        st.write(f"🔮 **7-Day Forecast for {target} ({hosp}):**")
+        forecast_table = pd.DataFrame({
+            'Date': future_dates,
+            'Forecast': future_pred,
+            'Lower Bound': lower_bound,
+            'Upper Bound': upper_bound
+        })
+        st.dataframe(forecast_table)
         
         results.append({'Hospital': hosp, 'Target': target, 'MAE': mae, 'RMSE': rmse})
 
