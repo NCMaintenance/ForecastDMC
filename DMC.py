@@ -1,96 +1,123 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+from datetime import timedelta
+
+# Forecasting imports
 from darts import TimeSeries
-from darts.models import InformerModel
-from darts.metrics import mae
-from darts.utils.timeseries_generation import datetime_attribute_timeseries
+from darts.models import NBEATSModel
+from darts.utils.likelihood_models import GaussianLikelihood
 
-st.set_page_config(layout="wide")
-st.title("🏥 Hospital Bed Forecasting using Transformers")
+# Plotting
+import matplotlib.pyplot as plt
 
-st.sidebar.header("Upload Excel File")
-file = st.sidebar.file_uploader("Upload Excel file", type=["xlsx"])
+st.set_page_config(page_title="ED & Trolley Forecasting", layout="wide")
+st.title("Hospital ED & Trolley Forecasting App")
 
-if file:
+# 1. Upload data
+uploaded_file = st.file_uploader("Upload your Excel data file", type=["xlsx", "xls"])  
+if uploaded_file is None:
+    st.info("Please upload an Excel file with Date and the 7 metrics columns.")
+    st.stop()
+
+# 2. Load Data
+@st.cache_data
+def load_data(file) -> pd.DataFrame:
     df = pd.read_excel(file)
-
-    # Clean & preprocess
     df.columns = df.columns.str.strip()
+    # Expect a 'Date' column
     df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').reset_index(drop=True)
+    return df
 
-    # Hospital selection
-    hospital = st.sidebar.selectbox("Select Hospital", df['Hospital'].unique())
-    selected_df = df[df['Hospital'] == hospital].copy()
-    selected_df = selected_df.sort_values('Date')
+df = load_data(uploaded_file)
+st.write("#### Raw Data", df.head())
 
-    # Target feature selection
-    targets = [
-        'Tracker8am',
-        'Tracker2pm',
-        'Tracker8pm',
-        'AdditionalCapacityOpen Morning',
-        'TimeTotal_8am',
-        'TimeTotal_2pm',
-        'TimeTotal_8pm'
-    ]
-    target_col = st.sidebar.selectbox("Select Variable to Forecast", targets)
+# 3. Select metrics to forecast
+metrics = st.multiselect(
+    "Select metrics to forecast (7 available)",
+    options=[c for c in df.columns if c != 'Date'],
+    default=[c for c in df.columns if c != 'Date']
+)
+if not metrics:
+    st.warning("Please select at least one metric.")
+    st.stop()
 
-    # Convert to TimeSeries
-    series = TimeSeries.from_dataframe(selected_df, 'Date', target_col)
+# 4. Prepare Darts TimeSeries
+@st.cache_data
+def prepare_timeseries(df: pd.DataFrame, metrics: list) -> TimeSeries:
+    ts = TimeSeries.from_dataframe(df, time_col='Date', value_cols=metrics)
+    return ts
 
-    # Create time covariates (day of week, month)
-    day_of_week = datetime_attribute_timeseries(series, attribute="day_of_week", one_hot=True)
-    month = datetime_attribute_timeseries(series, attribute="month", one_hot=True)
-    covariates = day_of_week.stack(month)
+ts = prepare_timeseries(df, metrics)
 
-    # Train/Test split
-    split_date = selected_df['Date'].iloc[-30]
-    train, test = series.split_after(split_date)
-    cov_train, cov_test = covariates.split_after(split_date)
+# 5. Model training parameters
+input_chunk = st.sidebar.number_input(
+    "Input sequence length (days)", min_value=7, max_value=60, value=14)
+output_chunk = st.sidebar.number_input(
+    "Forecast horizon (days)", min_value=1, max_value=30, value=7)
+epochs = st.sidebar.number_input(
+    "Training epochs", min_value=10, max_value=500, value=100, step=10)
 
-    st.subheader("📊 Historical Data")
-    fig = px.line(selected_df, x='Date', y=target_col, title=f"{hospital}: {target_col} Over Time")
-    st.plotly_chart(fig, use_container_width=True)
+# 6. Train/Test split
+train_ts = ts[:-output_chunk]
+test_ts  = ts[-output_chunk:]
 
-    st.sidebar.header("Model Parameters")
-    input_chunk = st.sidebar.slider("Input Chunk Length", 14, 90, 30)
-    output_chunk = st.sidebar.slider("Forecast Horizon (Days)", 7, 60, 14)
-
-    st.info("⏳ Training Informer model... (may take a minute)")
-    model = InformerModel(
+# 7. Fit N-BEATS Model with probabilistic likelihood
+@st.cache_resource
+def train_model(train_ts, input_chunk, output_chunk, epochs):
+    model = NBEATSModel(
         input_chunk_length=input_chunk,
         output_chunk_length=output_chunk,
-        n_epochs=100,
-        batch_size=32,
-        model_name=f"informer_{target_col.replace(' ', '_')}",
-        save_checkpoints=True,
-        force_reset=True,
+        n_epochs=epochs,
+        likelihood=GaussianLikelihood(),
+        random_state=42
+    )
+    model.fit([train_ts], verbose=False)
+    return model
+
+with st.spinner("Training N-BEATS model..."):
+    model = train_model(train_ts, input_chunk, output_chunk, epochs)
+
+# 8. Forecast
+with st.spinner(f"Forecasting next {output_chunk} days..."):
+    # Generate probabilistic forecasts
+    forecast_ts = model.predict(
+        n=output_chunk,
+        num_samples=200,
+        series=train_ts
     )
 
-    model.fit(train, future_covariates=cov_train, verbose=True)
+# 9. Extract mean and intervals
+forecast_df = forecast_ts.pd_dataframe().reset_index()
+forecast_df.rename(columns={'index': 'Date'}, inplace=True)
 
-    forecast = model.predict(output_chunk, future_covariates=cov_test)
-    full_df = pd.DataFrame({
-        "Date": forecast.time_index,
-        "Forecast": forecast.values().flatten(),
-        "Actual": test.values().flatten()[:output_chunk] if len(test) >= output_chunk else None
-    })
+# Use the quantile method to get intervals
+quantiles = model.predict_interval(train_ts, n=output_chunk, num_samples=200)
+q_lower = quantiles[0].pd_dataframe().reset_index().rename(columns={'index': 'Date'})
+q_upper = quantiles[1].pd_dataframe().reset_index().rename(columns={'index': 'Date'})
 
-    st.subheader("📈 Forecast vs Actual")
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=full_df['Date'], y=full_df['Forecast'], name='Forecast'))
-    if full_df['Actual'].notna().all():
-        fig2.add_trace(go.Scatter(x=full_df['Date'], y=full_df['Actual'], name='Actual'))
-    st.plotly_chart(fig2, use_container_width=True)
+# 10. Display results
+st.write(f"## Forecast for next {output_chunk} days")
+for metric in metrics:
+    st.write(f"### {metric}")
+    plt.figure(figsize=(10, 4))
+    # Plot historical
+    plt.plot(df['Date'], df[metric], label='Historical')
+    # Plot forecast mean
+    plt.plot(forecast_df['Date'], forecast_df[metric], label='Forecast')
+    # Plot intervals
+    plt.fill_between(
+        q_lower['Date'],
+        q_lower[metric],
+        q_upper[metric],
+        alpha=0.3,
+        label='95% Prediction Interval'
+    )
+    plt.xlabel('Date')
+    plt.ylabel(metric)
+    plt.legend()
+    st.pyplot(plt)
 
-    st.subheader("📋 Forecast Table")
-    st.dataframe(full_df.round(2))
+st.success("Forecasting complete!")
 
-    if full_df['Actual'].notna().all():
-        error = mae(TimeSeries.from_dataframe(full_df, 'Date', 'Forecast'),
-                    TimeSeries.from_dataframe(full_df, 'Date', 'Actual'))
-        st.metric(label=f"Mean Absolute Error (MAE) for {target_col}", value=f"{error:.2f}")
-else:
-    st.warning("Please upload an Excel file with hospital data to begin.")
+# End of Streamlit app
