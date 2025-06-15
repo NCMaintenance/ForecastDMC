@@ -24,6 +24,64 @@ CURRENT_USER = "NCMaintenance"
 st.set_page_config(layout="wide")
 st.title("🏥 Advanced Hospital Forecasting with Auto-Optimization 📈")
 
+# --- Sidebar Controls ---
+st.sidebar.header("⚙️ Configuration")
+uploaded = st.sidebar.file_uploader("📂 Upload Excel file", type="xlsx")
+hospitals = []
+targets = [
+    "Tracker8am", "Tracker2pm", "Tracker8pm",
+    "AdditionalCapacityOpen Morning",
+    "TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"
+]
+
+if not uploaded:
+    st.info("👋 Welcome! Please upload your Excel file using the sidebar to begin.")
+    st.stop()
+
+# --- Data Loading and Initial Processing ---
+@st.cache_data
+def load_data(uploaded_file):
+    try:
+        df = pd.read_excel(uploaded_file)
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.dropna(subset=['Date'])
+        df = df.sort_values('Date')
+        return df
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None
+
+df = load_data(uploaded)
+if df is None:
+    st.stop()
+
+hospitals = sorted(df['Hospital'].unique())
+
+# Enhanced configuration with automatic optimization
+sel_hosp = st.sidebar.selectbox("🏨 Hospital", ["All"] + hospitals)
+sel_target = st.sidebar.selectbox("🎯 Target", ["All"] + targets)
+future_days = st.sidebar.slider("⏳ Forecast horizon (days ahead)", 7, 90, 30)
+
+# Automatic lookback calculation based on data availability
+def calculate_optimal_lookback(df_length):
+    """Calculate optimal lookback period based on data length and seasonal patterns"""
+    if df_length >= 730:  # 2+ years
+        return min(90, df_length // 8)  # Up to 90 days lookback
+    elif df_length >= 365:  # 1+ year
+        return min(60, df_length // 6)  # Up to 60 days lookback
+    elif df_length >= 180:  # 6+ months
+        return min(45, df_length // 4)  # Up to 45 days lookback
+    else:
+        return min(30, df_length // 3)  # Minimum viable lookback
+
+correlation_threshold = st.sidebar.slider("📊 Correlation threshold for feature selection", 0.0, 0.3, 0.05, 0.01)
+auto_optimize = st.sidebar.checkbox("🔧 Auto-optimize parameters", value=True)
+run = st.sidebar.button("▶️ Run Forecast")
+
+if not run:
+    st.info("ℹ️ Configure your forecast parameters in the sidebar and click 'Run Forecast'.")
+    st.stop()
+    
 # Helper Functions
 def calculate_feature_importance_score(df, feature, target):
     """Calculate feature importance score based on multiple metrics"""
