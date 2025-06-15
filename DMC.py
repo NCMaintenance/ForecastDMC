@@ -1,201 +1,225 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import timedelta
+from prophet import Prophet
+from prophet.diagnostics import cross_validation, performance_metrics
+from timesfm import TimesFM  # Using TimesFM instead of LightGBM
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+import plotly.graph_objs as go
+import warnings
 
-# --- MUST be the very first Streamlit command ---
-st.set_page_config(layout="centered", page_title="TimesFM Forecasting App", page_icon="📈")
+warnings.filterwarnings("ignore")
 
-# Try importing timesfm library
-try:
-    from timesfm import TimesFM
-    ACTUAL_TIMESFM_AVAILABLE = True
-except ImportError:
-    ACTUAL_TIMESFM_AVAILABLE = False
-except Exception:
-    ACTUAL_TIMESFM_AVAILABLE = False
+st.set_page_config(layout="wide")
+st.title("📈 Hospital Forecasting with Prophet & TimesFM")
 
-def simulate_forecast_fallback(data: pd.Series, horizon: int) -> pd.DataFrame:
-    if data.empty:
-        return pd.DataFrame(columns=['Date', 'Forecasted Value'])
+# Sidebar
+uploaded = st.sidebar.file_uploader("Upload Excel file", type="xlsx")
+hospitals = []
+targets = [
+    "Tracker8am", "Tracker2pm", "Tracker8pm",
+    "AdditionalCapacityOpen Morning",
+    "TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"
+]
 
-    last_date = data.index[-1]
-    freq = pd.infer_freq(data.index)
-    if freq:
-        if 'D' in freq:
-            interval = timedelta(days=int(freq.replace('D',''))) if freq != 'D' else timedelta(days=1)
-        elif 'H' in freq:
-            interval = timedelta(hours=int(freq.replace('H',''))) if freq != 'H' else timedelta(hours=1)
-        elif 'Min' in freq:
-            interval = timedelta(minutes=int(freq.replace('Min',''))) if freq != 'Min' else timedelta(minutes=1)
-        elif 'MS' in freq or 'M' in freq:
-            interval = timedelta(days=30)
-        else:
-            interval = timedelta(days=1)
-    else:
-        interval = timedelta(days=(data.index[1] - data.index[0]).days) if len(data) > 1 else timedelta(days=1)
-        if interval.days == 0:
-            interval = data.index.to_series().diff().dropna().min()
-            if pd.isna(interval):
-                interval = timedelta(days=1)
+if not uploaded:
+    st.sidebar.info("Please upload your Excel file.")
+    st.stop()
 
-    forecast_dates = [last_date + (interval * (i + 1)) for i in range(horizon)]
+# Load data
+df = pd.read_excel(uploaded)
+df['Date'] = pd.to_datetime(df['Date'])
+df = df.sort_values('Date')
+hospitals = sorted(df['Hospital'].unique())
+sel_hosp = st.sidebar.selectbox("Hospital", ["All"] + hospitals)
+sel_target = st.sidebar.selectbox("Target", ["All"] + targets)
 
-    diff_mean = data.diff().mean() if len(data) > 1 else 0
-    if pd.isna(diff_mean):
-        diff_mean = 0
+future_days = st.sidebar.slider("Forecast horizon (days ahead)", 7, 30, 14)
+run = st.sidebar.button("🚀 Run Forecast")
+if not run:
+    st.sidebar.info("Configure then click Run Forecast")
+    st.stop()
 
-    last_value = data.iloc[-1]
-    forecasted_values = [last_value + (i + 1) * diff_mean + np.random.normal(0, 0.05 * last_value) for i in range(horizon)]
+# Filters
+h_list = hospitals if sel_hosp == "All" else [sel_hosp]
+t_list = targets if sel_target == "All" else [sel_target]
 
-    forecast_df = pd.DataFrame({
-        'Date': forecast_dates,
-        'Forecasted Value': forecasted_values
-    })
-    forecast_df.set_index('Date', inplace=True)
-    return forecast_df
+results = []
 
-
-def run_timesfm_forecast(data: pd.Series, horizon: int) -> pd.DataFrame:
-    if not ACTUAL_TIMESFM_AVAILABLE:
-        st.error("Cannot run actual TimesFM: Library not available.")
-        return pd.DataFrame(columns=['Date', 'Forecasted Value'])
-
-    st.info("Initializing and running actual TimesFM model... (This might take a moment)")
-    try:
-        # Placeholder for actual TimesFM initialization and forecast call
-        # Replace this block with actual TimesFM usage based on their docs
+# Main loop for hospitals and targets
+for hosp in h_list:
+    st.header(f"🏥 {hosp}")
+    df_h = df[df['Hospital'] == hosp].reset_index(drop=True)
+    
+    for tgt in t_list:
+        st.subheader(f"🎯 {tgt}")
         
-        # For demonstration, fallback to simulation here
-        st.info("TimesFM model would be loaded and invoked here. Replace this with real code.")
-        return simulate_forecast_fallback(data, horizon)
-
-    except Exception as e:
-        st.error(f"Error during actual TimesFM forecasting: {e}. Falling back to simulation.")
-        return simulate_forecast_fallback(data, horizon)
-
-
-# Main app UI
-st.title("📈 Time Series Forecasting with TimesFM")
-st.markdown("""
-Upload your CSV file, specify the date and value columns, and set a forecast horizon.
-This app attempts to use the actual `timesfm` library for forecasting. If `timesfm` is not found,
-it will fall back to a simulated forecast.
-""")
-
-# Show library import status message here (after page config)
-if ACTUAL_TIMESFM_AVAILABLE:
-    st.success("✅ `timesfm` library found! Attempting actual model inference.")
-else:
-    st.warning("⚠️ `timesfm` library not found. Please install it (`pip install timesfm`) to run actual TimesFM. Falling back to simulated forecast.")
-
-# --- File Upload Section ---
-st.header("1. Upload Your Data")
-uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
-
-df = None
-if uploaded_file is not None:
-    try:
-        df = pd.read_csv(uploaded_file)
-        st.success("CSV file uploaded successfully!")
-        st.subheader("Preview of Your Data")
-        st.write(df.head())
-
-        st.subheader("Available Columns")
-        st.write(df.columns.tolist())
-
-    except Exception as e:
-        st.error(f"Error reading CSV: {e}. Please ensure it's a valid CSV file.")
-
-# --- Configuration Section ---
-st.header("2. Configure Forecasting")
-
-date_column_options = [''] + (df.columns.tolist() if df is not None else [])
-date_col = st.selectbox(
-    "Select the Date/Time Column",
-    options=date_column_options,
-    help="This column should contain your time series dates/timestamps."
-)
-
-value_column_options = [''] + (df.select_dtypes(include=np.number).columns.tolist() if df is not None else [])
-value_col = st.selectbox(
-    "Select the Value Column to Forecast",
-    options=value_column_options,
-    help="This column should contain the numerical values you want to predict."
-)
-
-forecast_horizon = st.number_input(
-    "Enter Forecast Horizon (number of periods to predict)",
-    min_value=1,
-    value=7,
-    step=1,
-    help="How many future periods (e.g., days, months) do you want to forecast?"
-)
-
-# --- Perform Forecasting ---
-st.header("3. Run Forecasting")
-
-if st.button("Generate Forecast"):
-    if df is None:
-        st.warning("Please upload a CSV file first.")
-    elif not date_col or not value_col:
-        st.warning("Please select both a Date/Time Column and a Value Column.")
-    else:
+        # Data preparation
         try:
-            # Preprocessing
-            st.info("Preprocessing data...")
-            temp_df = df.copy()
-            temp_df[date_col] = pd.to_datetime(temp_df[date_col])
-            temp_df.set_index(date_col, inplace=True)
-            temp_df.sort_index(inplace=True)
+            # Drop non-correlated variables
+            drop_cols = []
+            if tgt in ["Tracker8am", "Tracker2pm", "Tracker8pm"]:
+                drop_cols = ["TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"]
+            elif tgt in ["TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"]:
+                drop_cols = ["Tracker8am", "Tracker2pm", "Tracker8pm"]
+            drop_cols = [col for col in drop_cols if col in df_h.columns and col != "AdditionalCapacityOpen Morning"]
+            df_h_clean = df_h.drop(columns=drop_cols, errors='ignore')
 
-            time_series_data = pd.to_numeric(temp_df[value_col], errors='coerce').dropna()
+            if df_h_clean[tgt].isna().any():
+                st.warning("Skipping (nulls present)")
+                continue
 
-            if time_series_data.empty:
-                st.error("The selected value column is empty or contains no valid numerical data after processing. Please check your data or column selection.")
+            # Feature engineering
+            df2 = df_h_clean[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
+            
+            # Add time-based features
+            for lag in range(1, 8):  # Extending lag features
+                df2[f'y_lag{lag}'] = df2['y'].shift(lag)
+            df2['y_diff1'] = df2['y'] - df2['y'].shift(1)
+            df2['y_diff7'] = df2['y'] - df2['y'].shift(7)  # Weekly difference
+
+            # Enhanced seasonal features
+            df2['dow'] = df2['ds'].dt.weekday
+            df2['month'] = df2['ds'].dt.month
+            df2['week'] = df2['ds'].dt.isocalendar().week.astype(int)
+            df2['dayofyear'] = df2['ds'].dt.dayofyear
+            
+            # Cyclical features
+            for period, name in [(7, 'dow'), (12, 'month'), (52, 'week')]:
+                df2[f'{name}_sin'] = np.sin(2 * np.pi * df2[name] / period)
+                df2[f'{name}_cos'] = np.cos(2 * np.pi * df2[name] / period)
+
+            # Rolling statistics
+            for window in [7, 14, 30]:  # Multiple windows
+                df2[f'roll_mean{window}'] = df2['y'].rolling(window=window).mean()
+                df2[f'roll_std{window}'] = df2['y'].rolling(window=window).std()
+                df2[f'roll_max{window}'] = df2['y'].rolling(window=window).max()
+                df2[f'roll_min{window}'] = df2['y'].rolling(window=window).min()
+
+            df2 = df2.dropna().reset_index(drop=True)
+
+            # Prophet model for feature generation
+            m_feat = Prophet(
+                yearly_seasonality=True,
+                weekly_seasonality=True,
+                daily_seasonality=False,
+                seasonality_mode='additive'
+            )
+            m_feat.add_country_holidays(country_name='IE')
+            m_feat.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+            m_feat.fit(df2[['ds', 'y']])
+            prophet_feat = m_feat.predict(df2[['ds']])[['ds', 'yhat']]
+            df2 = df2.merge(prophet_feat, on='ds')
+
+            # Split data
+            n = len(df2)
+            split = int(0.8 * n)
+            train = df2.iloc[:split].reset_index(drop=True)
+            test = df2.iloc[split:].reset_index(drop=True)
+
+            # Define features for TimesFM
+            feats = [col for col in df2.columns if col not in ['ds', 'y']]
+            
+            # TimesFM model
+            tfm = TimesFM(
+                time_col='ds',
+                target_col='y',
+                frequency='D',
+                max_lags=7,
+                seasonal_period=[7, 30]  # Weekly and monthly seasonality
+            )
+            
+            # Cross-validation for TimesFM
+            tscv = TimeSeriesSplit(n_splits=5)
+            tfm_maes = []
+            
+            for ti, vi in tscv.split(train):
+                tfm.fit(train.iloc[ti])
+                tfm_pred = tfm.predict(train.iloc[vi][['ds']])
+                tfm_maes.append(mean_absolute_error(train.iloc[vi]['y'], tfm_pred))
+            
+            mae_tfm = np.mean(tfm_maes)
+
+            # Final TimesFM model
+            tfm_final = TimesFM(
+                time_col='ds',
+                target_col='y',
+                frequency='D',
+                max_lags=7,
+                seasonal_period=[7, 30]
+            )
+            tfm_final.fit(train)
+            t_test = tfm_final.predict(test[['ds']])
+
+            # Prophet cross-validation
+            try:
+                cv = cross_validation(m_feat, initial='180 days', period='30 days', horizon='30 days', parallel=None)
+                mae_prophet = performance_metrics(cv)['mae'].mean()
+            except:
+                mae_prophet = np.inf
+
+            # Hybrid prediction
+            if np.isinf(mae_prophet):
+                pred_test = t_test
+                method = "TimesFM only"
             else:
-                st.success("Data preprocessed successfully!")
-                st.subheader("Historical Data Plot")
-                st.line_chart(time_series_data)
+                w_p = 1 / mae_prophet
+                w_t = 1 / mae_tfm
+                S = w_p + w_t
+                pred_test = (w_p * m_feat.predict(test[['ds']])['yhat'].values + w_t * t_test) / S
+                method = f"Hybrid (P:{w_p/S:.2f},T:{w_t/S:.2f})"
 
-                st.subheader("Forecasted Results")
-                if ACTUAL_TIMESFM_AVAILABLE:
-                    forecast_df_results = run_timesfm_forecast(time_series_data, forecast_horizon)
-                else:
-                    forecast_df_results = simulate_forecast_fallback(time_series_data, forecast_horizon)
+            # Future predictions
+            fut_pd = m_feat.make_future_dataframe(periods=future_days, include_history=False)
+            p_prop_fut = m_feat.predict(fut_pd)['yhat'].values
+            t_fut = tfm_final.predict(fut_pd)
+            
+            pred_fut = (w_p * p_prop_fut + w_t * t_fut) / S if not np.isinf(mae_prophet) else t_fut
 
-                if not forecast_df_results.empty:
-                    st.write(forecast_df_results)
-                    st.subheader("Forecast Plot")
-                    combined_data = pd.concat([time_series_data, forecast_df_results['Forecasted Value']])
-                    st.line_chart(combined_data)
-                else:
-                    st.warning("No forecast could be generated. Please check your data or `timesfm` installation.")
+            # Calculate metrics
+            mae_test = mean_absolute_error(test['y'], pred_test)
 
-        except KeyError:
-            st.error("One of the selected columns was not found or accessible after processing. Please check column names.")
+            # Plotting
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='lines+markers', name='Actual'))
+            fig.add_trace(go.Scatter(x=test['ds'], y=pred_test, mode='lines+markers', name='Pred (test)'))
+            fig.add_trace(go.Scatter(x=fut_pd['ds'], y=pred_fut, mode='lines+markers', name='Forecast', line=dict(dash='dash')))
+            
+            fig.update_layout(
+                title=f"{hosp} • {tgt} | {method} | MAE: {mae_test:.2f}",
+                xaxis_title="Date",
+                yaxis_title=tgt,
+                template="plotly_white"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Display results
+            st.markdown("**Test‑set Results**")
+            st.dataframe(pd.DataFrame({
+                "Date": test['ds'],
+                "Actual": test['y'],
+                "Predicted": pred_test,
+                "Error": np.abs(test['y'] - pred_test)
+            }).round(2), use_container_width=True)
+
+            st.markdown("**Future Forecast**")
+            st.dataframe(pd.DataFrame({
+                "Date": fut_pd['ds'],
+                "Forecast": pred_fut
+            }).round(2), use_container_width=True)
+
+            results.append({
+                "Hospital": hosp,
+                "Target": tgt,
+                "Method": method,
+                "Test MAE": round(mae_test, 2)
+            })
+            
         except Exception as e:
-            st.error(f"An unexpected error occurred during forecasting: {e}")
+            st.error(f"Error processing {hosp} - {tgt}: {str(e)}")
+            continue
 
-st.markdown("""
----
-### How to Run This Application Locally:
-
-1.  **Save the code:** Copy the entire code block above and save it as a Python file (e.g., `timesfm_app.py`) on your local machine.
-
-2.  **Install necessary libraries:** Open your terminal or command prompt and run:
-    ```bash
-    pip install streamlit pandas numpy
-    ```
-    **For actual TimesFM functionality, you will also need the `timesfm` library.** Please refer to official documentation for exact installation instructions:
-    ```bash
-    pip install timesfm
-    ```
-    *(Note: TimesFM API usage may require downloading checkpoints or additional setup.)*
-
-3.  **Run the Streamlit app:** In your terminal, navigate to the directory where you saved `timesfm_app.py` and run:
-    ```bash
-    streamlit run timesfm_app.py
-    ```
-    This will open the application in your web browser. Upload your CSV file, select your columns, and set the forecast horizon.
-""")
+# Display summary
+st.subheader("📊 Summary")
+st.dataframe(pd.DataFrame(results), use_container_width=True)
