@@ -28,7 +28,7 @@ def load_data(file):
         df = pd.read_csv(file)
     else:
         df = pd.read_excel(file)
-    df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
+    df['ds'] = pd.to_datetime(df['Date'], errors='coerce')
     df = df.dropna(subset=['ds'])
     df = df.sort_values('ds')
     return df
