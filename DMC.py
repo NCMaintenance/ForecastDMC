@@ -61,8 +61,15 @@ def create_advanced_features(df, metric, ir_holidays):
     prophet_df['y_volatility_7d'] = prophet_df['y'].rolling(7).std() / prophet_df['y'].rolling(7).mean()
     
     # Holiday effects (more sophisticated)
-    holiday_dates = set(ir_holidays.keys())
-    prophet_df['is_holiday'] = prophet_df.index.date.map(lambda x: 1 if x in holiday_dates else 0)
+    holiday_dates = set(pd.to_datetime(list(ir_holidays.keys())).date)
+    
+    # Ensure we can extract dates from the index
+    if hasattr(prophet_df.index, 'date'):
+        date_series = pd.Series(prophet_df.index.date, index=prophet_df.index)
+    else:
+        date_series = pd.Series([d.date() for d in prophet_df.index], index=prophet_df.index)
+    
+    prophet_df['is_holiday'] = date_series.map(lambda x: 1 if x in holiday_dates else 0)
     prophet_df['days_since_holiday'] = 0
     prophet_df['days_until_holiday'] = 0
     
