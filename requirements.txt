@@ -9,4 +9,4 @@ plotly
 optuna
 seaborn
 statsmodels
-darts
+darts[torch]
