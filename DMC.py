@@ -137,8 +137,9 @@ for hosp in selected_hospitals:
         
         # Predictions
         lgb_pred = lgb_model.predict(test_df[feature_cols])
+        mse = mean_squared_error(test_df['y'], lgb_pred)
+        rmse = np.sqrt(mse)  # Fixed RMSE calculation
         mae = mean_absolute_error(test_df['y'], lgb_pred)
-        rmse = mean_squared_error(test_df['y'], lgb_pred, squared=False)
         
         # Results Visualization
         fig = go.Figure()
