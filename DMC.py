@@ -47,30 +47,63 @@ if not run:
     st.sidebar.info("⚙️ Configure then click Run Forecast")
     st.stop()
 
-def create_advanced_features(df_input, target_col, max_lags=7):
-    """Create comprehensive feature set with leak prevention"""
+def create_advanced_features(df_input, target_col, all_hospital_cols, max_lags=7):
+    """Create comprehensive feature set with leak prevention for all hospital metrics"""
     df_feat = df_input.copy()
     
-    # Basic lag features (1-7 days)
-    for lag in range(1, max_lags + 1):
-        df_feat[f'y_lag_{lag}'] = df_feat[target_col].shift(lag)
+    # Get all numeric columns (hospital metrics) excluding the target
+    predictor_cols = [col for col in all_hospital_cols if col != target_col and col in df_feat.columns]
     
-    # Differencing features
-    for lag in [1, 2, 3, 7]:
-        df_feat[f'y_diff_{lag}'] = df_feat[target_col].diff(lag)
+    # Add the target column for self-lags
+    all_feature_cols = predictor_cols + [target_col]
     
-    # Rolling statistics (multiple windows)
+    # Basic lag features (1-7 days) for ALL hospital metrics
+    for col in all_feature_cols:
+        col_name = 'target' if col == target_col else col
+        for lag in range(1, max_lags + 1):
+            df_feat[f'{col_name}_lag_{lag}'] = df_feat[col].shift(lag)
+    
+    # Differencing features for ALL hospital metrics
+    for col in all_feature_cols:
+        col_name = 'target' if col == target_col else col
+        for lag in [1, 2, 3, 7]:
+            df_feat[f'{col_name}_diff_{lag}'] = df_feat[col].diff(lag)
+    
+    # Rolling statistics (multiple windows) for ALL hospital metrics
     windows = [3, 7, 14, 21]
-    for window in windows:
-        df_feat[f'roll_mean_{window}'] = df_feat[target_col].rolling(window=window, min_periods=1).mean().shift(1)
-        df_feat[f'roll_std_{window}'] = df_feat[target_col].rolling(window=window, min_periods=1).std().shift(1)
-        df_feat[f'roll_min_{window}'] = df_feat[target_col].rolling(window=window, min_periods=1).min().shift(1)
-        df_feat[f'roll_max_{window}'] = df_feat[target_col].rolling(window=window, min_periods=1).max().shift(1)
-        df_feat[f'roll_median_{window}'] = df_feat[target_col].rolling(window=window, min_periods=1).median().shift(1)
+    for col in all_feature_cols:
+        col_name = 'target' if col == target_col else col
+        for window in windows:
+            df_feat[f'{col_name}_roll_mean_{window}'] = df_feat[col].rolling(window=window, min_periods=1).mean().shift(1)
+            df_feat[f'{col_name}_roll_std_{window}'] = df_feat[col].rolling(window=window, min_periods=1).std().shift(1)
+            df_feat[f'{col_name}_roll_min_{window}'] = df_feat[col].rolling(window=window, min_periods=1).min().shift(1)
+            df_feat[f'{col_name}_roll_max_{window}'] = df_feat[col].rolling(window=window, min_periods=1).max().shift(1)
+            df_feat[f'{col_name}_roll_median_{window}'] = df_feat[col].rolling(window=window, min_periods=1).median().shift(1)
     
-    # Exponential weighted features
-    for alpha in [0.1, 0.3, 0.5]:
-        df_feat[f'ewm_mean_{alpha}'] = df_feat[target_col].ewm(alpha=alpha).mean().shift(1)
+    # Exponential weighted features for ALL hospital metrics
+    for col in all_feature_cols:
+        col_name = 'target' if col == target_col else col
+        for alpha in [0.1, 0.3, 0.5]:
+            df_feat[f'{col_name}_ewm_mean_{alpha}'] = df_feat[col].ewm(alpha=alpha).mean().shift(1)
+    
+    # Cross-correlation features (relationships between different metrics)
+    for i, col1 in enumerate(predictor_cols):
+        for j, col2 in enumerate(predictor_cols[i+1:], i+1):
+            # Rolling correlations between different metrics
+            for window in [7, 14]:
+                df_feat[f'{col1}_{col2}_rolling_corr_{window}'] = df_feat[col1].rolling(window).corr(df_feat[col2]).shift(1)
+            
+            # Ratio features
+            df_feat[f'{col1}_{col2}_ratio'] = (df_feat[col1] / (df_feat[col2] + 1e-8)).shift(1)
+    
+    # Aggregate features across all metrics
+    if len(predictor_cols) > 1:
+        predictor_data = df_feat[predictor_cols]
+        df_feat['all_metrics_mean'] = predictor_data.mean(axis=1).shift(1)
+        df_feat['all_metrics_std'] = predictor_data.std(axis=1).shift(1)
+        df_feat['all_metrics_sum'] = predictor_data.sum(axis=1).shift(1)
+        df_feat['all_metrics_max'] = predictor_data.max(axis=1).shift(1)
+        df_feat['all_metrics_min'] = predictor_data.min(axis=1).shift(1)
     
     # Temporal features
     df_feat['dow'] = df_feat['ds'].dt.dayofweek
@@ -185,10 +218,15 @@ for hosp in h_list:
             st.warning("⚠️ Skipping due to null values in target")
             continue
 
-        df2 = df_h[['Date', tgt]].rename(columns={'Date': 'ds', tgt: 'y'})
+        # Get all available hospital metrics for this hospital
+        available_targets = [col for col in targets if col in df_h.columns and not df_h[col].isna().all()]
         
-        # Create advanced features
-        df_feat = create_advanced_features(df2, 'y', max_lags=7)
+        # Create dataframe with all hospital metrics
+        df2 = df_h[['Date'] + available_targets].rename(columns={'Date': 'ds'})
+        df2 = df2.rename(columns={tgt: 'y'})  # Rename target to 'y'
+        
+        # Create advanced features using ALL hospital metrics
+        df_feat = create_advanced_features(df2, 'y', available_targets, max_lags=7)
         
         # Remove rows with too many NaN values
         df_feat = df_feat.dropna(thresh=len(df_feat.columns) * 0.7)
@@ -415,22 +453,41 @@ for hosp in h_list:
             new_row['dayofyear_sin'] = np.sin(2 * np.pi * new_row['dayofyear'] / 365.25)
             new_row['dayofyear_cos'] = np.cos(2 * np.pi * new_row['dayofyear'] / 365.25)
             
-            # Lag features (use recent predictions for future lags)
+            # Generate lag features for all metrics (using recent predictions for target, actual values for others)
+            recent_target_values = list(current_data['y'].tail(21)) + future_preds
+            
+            # Target lags
             for lag in range(1, 8):
                 if lag <= len(future_preds):
-                    new_row[f'y_lag_{lag}'] = future_preds[-lag]
+                    new_row[f'target_lag_{lag}'] = future_preds[-lag]
                 else:
-                    new_row[f'y_lag_{lag}'] = current_data['y'].iloc[-lag]
+                    new_row[f'target_lag_{lag}'] = current_data['y'].iloc[-lag]
             
-            # Rolling features
-            recent_values = list(current_data['y'].tail(21)) + future_preds
+            # Other metric lags (use actual values since we're not predicting them)
+            for col in [c for c in available_targets if c != tgt]:
+                for lag in range(1, 8):
+                    if len(current_data) >= lag:
+                        new_row[f'{col}_lag_{lag}'] = current_data[col].iloc[-lag]
+            
+            # Rolling features for target
             for window in [3, 7, 14, 21]:
-                if len(recent_values) >= window:
-                    new_row[f'roll_mean_{window}'] = np.mean(recent_values[-window:])
-                    new_row[f'roll_std_{window}'] = np.std(recent_values[-window:])
-                    new_row[f'roll_min_{window}'] = np.min(recent_values[-window:])
-                    new_row[f'roll_max_{window}'] = np.max(recent_values[-window:])
-                    new_row[f'roll_median_{window}'] = np.median(recent_values[-window:])
+                if len(recent_target_values) >= window:
+                    new_row[f'target_roll_mean_{window}'] = np.mean(recent_target_values[-window:])
+                    new_row[f'target_roll_std_{window}'] = np.std(recent_target_values[-window:])
+                    new_row[f'target_roll_min_{window}'] = np.min(recent_target_values[-window:])
+                    new_row[f'target_roll_max_{window}'] = np.max(recent_target_values[-window:])
+                    new_row[f'target_roll_median_{window}'] = np.median(recent_target_values[-window:])
+            
+            # Rolling features for other metrics
+            for col in [c for c in available_targets if c != tgt]:
+                for window in [3, 7, 14, 21]:
+                    if len(current_data) >= window:
+                        recent_values = current_data[col].tail(window)
+                        new_row[f'{col}_roll_mean_{window}'] = recent_values.mean()
+                        new_row[f'{col}_roll_std_{window}'] = recent_values.std()
+                        new_row[f'{col}_roll_min_{window}'] = recent_values.min()
+                        new_row[f'{col}_roll_max_{window}'] = recent_values.max()
+                        new_row[f'{col}_roll_median_{window}'] = recent_values.median()
             
             # Fill remaining features with reasonable defaults
             for col in selected_features:
