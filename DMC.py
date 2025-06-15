@@ -46,7 +46,11 @@ if uploaded_file is not None:
         if 'Date' not in df.columns:
             st.error("Error: 'Date' column not found. Please ensure your Excel has a 'Date' column.")
             st.stop()
-        df = pd.to_datetime(df)
+        df = pd.to_datetime(df) # Convert 'Date' column to datetime [2]
+
+        # Define the 7 target metrics and their corresponding time suffixes based on user's column names
+        target_metrics_info =
+        target_columns = [info for info in target_metrics_info] # Extract just the names for convenience
 
         # Hospital Selection [3]
         st.header("2. Select Hospital for Forecasting")
@@ -63,7 +67,7 @@ if uploaded_file is not None:
             st.info(f"Data filtered for {selected_hospital}.")
         else:
             # Aggregate for 'All Hospitals' by summing the numerical metrics per day
-            numerical_cols_to_sum =
+            numerical_cols_to_sum = target_columns
             # Ensure these columns exist before summing
             existing_numerical_cols = [col for col in numerical_cols_to_sum if col in df_filtered.columns]
             if not existing_numerical_cols:
@@ -80,16 +84,6 @@ if uploaded_file is not None:
         st.subheader("Data Preview after Hospital Selection/Aggregation:")
         st.dataframe(df_filtered.head())
 
-        # Define the 7 target metrics and their corresponding time suffixes
-        # Based on user's column names: Tracker8am, Tracker2pm, Tracker8pm, TimeTotal_8am, TimeTotal_2pm, TimeTotal_8pm, AdditionalCapacityOpen Morning
-        target_metrics_info =
-
-        # Check if all target columns exist in the filtered dataframe
-        missing_targets = [info for info in target_metrics_info if info not in df_filtered.columns]
-        if missing_targets:
-            st.error(f"Error: The following expected metric columns are missing from your file: {', '.join(missing_targets)}. Please ensure your Excel contains these columns or adjust the column names in the code.")
-            st.stop()
-
         st.header("3. Data Preprocessing & Feature Engineering")
         st.info("Performing data cleaning, time-based feature extraction, and creating lagged/rolling statistics.")
 
@@ -98,7 +92,6 @@ if uploaded_file is not None:
 
         # Define the forecasting horizon
         forecast_horizon_days = 7
-        forecast_horizon_periods_per_day = 3 # 8am, 2pm, 8pm
         # Generate future dates for 8am, 2pm, 8pm for the forecast horizon [4]
         last_date = df_filtered.max()
         future_dates_list =
@@ -121,7 +114,7 @@ if uploaded_file is not None:
 
             # Create 'ds' column for the current metric's historical data
             temp_df = df_filtered.copy()
-            temp_df['ds'] = temp_df.dt.date.astype(str) + ' ' + time_suffix
+            temp_df['ds'] = temp_df.astype(str) + ' ' + time_suffix
             temp_df['ds'] = pd.to_datetime(temp_df['ds'])
             prophet_df_train = temp_df[['ds', metric_name]].rename(columns={metric_name: 'y'}).set_index('ds').sort_index().dropna()
 
@@ -129,14 +122,14 @@ if uploaded_file is not None:
                 st.warning(f"No valid historical data for {metric_name}. Skipping forecast for this metric.")
                 continue
 
-            # Feature Engineering for the current metric's historical data [8, 4]
+            # Feature Engineering for the current metric's historical data [8, 9]
             prophet_df_train['year'] = prophet_df_train.index.year
             prophet_df_train['month'] = prophet_df_train.index.month
             prophet_df_train['day'] = prophet_df_train.index.day
             prophet_df_train['dayofweek'] = prophet_df_train.index.dayofweek
             prophet_df_train['hour'] = prophet_df_train.index.hour
 
-            # Cyclical features [9]
+            # Cyclical features [8]
             prophet_df_train['hour_sin'] = np.sin(2 * np.pi * prophet_df_train['hour'] / 24)
             prophet_df_train['hour_cos'] = np.cos(2 * np.pi * prophet_df_train['hour'] / 24)
             prophet_df_train['dayofweek_sin'] = np.sin(2 * np.pi * prophet_df_train['dayofweek'] / 7)
@@ -149,7 +142,7 @@ if uploaded_file is not None:
             prophet_df_train[f'y_lag3'] = prophet_df_train['y'].shift(3) # Previous day's same time (assuming 3 observations/day)
             prophet_df_train[f'y_lag21'] = prophet_df_train['y'].shift(21) # Previous week's same time and day (assuming 3 observations/day)
 
-            # Rolling statistics [12, 13]
+            # Rolling statistics [2, 8]
             prophet_df_train[f'y_rolling_mean_3'] = prophet_df_train['y'].rolling(window=3).mean().shift(1)
             prophet_df_train[f'y_rolling_mean_21'] = prophet_df_train['y'].rolling(window=21).mean().shift(1) # 7 days * 3 observations/day
 
@@ -195,7 +188,7 @@ if uploaded_file is not None:
                 else:
                     future_df_metric[lag_col] = 0 # Fallback if feature not present
 
-            # Define exogenous regressors for Prophet and XGBoost [9]
+            # Define exogenous regressors for Prophet and XGBoost [8]
             prophet_exogenous_features = [
                 'year', 'month', 'day', 'dayofweek', 'hour',
                 'hour_sin', 'hour_cos', 'dayofweek_sin', 'dayofweek_cos',
@@ -204,7 +197,7 @@ if uploaded_file is not None:
             ]
             prophet_exogenous_features = [f for f in prophet_exogenous_features if f in prophet_df_train_cleaned.columns]
 
-            # 1. Train Prophet Model [14, 15]
+            # 1. Train Prophet Model [12, 13]
             m = Prophet(
                 seasonality_mode='additive',
                 daily_seasonality=True,
@@ -229,8 +222,8 @@ if uploaded_file is not None:
             prophet_df_train_cleaned[f'prophet_yhat'] = prophet_in_sample_yhat.values # Align index
             prophet_df_train_cleaned[f'residuals'] = prophet_df_train_cleaned['y'] - prophet_df_train_cleaned[f'prophet_yhat']
 
-            # 2. Train XGBoost Model on Residuals [16, 17]
-            # Features for XGBoost: all engineered features that are known for the future [18]
+            # 2. Train XGBoost Model on Residuals [14, 15]
+            # Features for XGBoost: all engineered features that are known for the future [16]
             xgb_features_for_residuals = [
                 'year', 'month', 'day', 'dayofweek', 'hour',
                 'hour_sin', 'hour_cos', 'dayofweek_sin', 'dayofweek_cos',
@@ -259,7 +252,6 @@ if uploaded_file is not None:
                 f'{metric_name}_forecast': hybrid_forecast_values,
                 # For hybrid, confidence intervals are more complex. For simplicity, we'll use Prophet's CIs as a proxy
                 # or calculate a simple range around the hybrid forecast.
-                # For this demo, we'll just show the point forecast for hybrid.
                 # In a real scenario, you'd need to combine uncertainties.
                 f'{metric_name}_lower': prophet_forecast_full.set_index('ds').loc[future_df_metric['ds'], 'yhat_lower'].values,
                 f'{metric_name}_upper': prophet_forecast_full.set_index('ds').loc[future_df_metric['ds'], 'yhat_upper'].values
@@ -287,7 +279,7 @@ if uploaded_file is not None:
         forecast_table_data = display_forecasts.pivot_table(
             index=['ds_date', 'ds_time'],
             columns='metric',
-            values=[f'{m}_forecast' for m in target_metrics_info if f'{m}_forecast' in display_forecasts.columns]
+            values=[f'{m}_forecast' for m in target_columns if f'{m}_forecast' in display_forecasts.columns]
         )
         st.dataframe(forecast_table_data)
 
@@ -337,16 +329,16 @@ if uploaded_file is not None:
 
         st.header("6. Considerations for Robustness and Overfitting")
         st.markdown("""
-        This hybrid Prophet-XGBoost approach aims to combine the strengths of both models: Prophet for its robust handling of trend and seasonality [14, 9, 15], and XGBoost for its ability to capture complex non-linear relationships and leverage a wide array of engineered features to model the remaining patterns (residuals).[19, 16, 17]
+        This hybrid Prophet-XGBoost approach aims to combine the strengths of both models: Prophet for its robust handling of trend and seasonality [12, 13], and XGBoost for its ability to capture complex non-linear relationships and leverage a wide array of engineered features to model the remaining patterns (residuals).[14, 15]
 
         To ensure the robustness and prevent overfitting, as highlighted in the research:
 
-        *   **Feature Engineering**: We've included various time-based features (hour, day of week, month, year, cyclical components) and basic lagged/rolling statistics. For a production system, more sophisticated lagged features (e.g., specific lags identified by autocorrelation plots [20, 10]), and rolling statistics (e.g., standard deviation, min/max over various windows) should be explored.[12, 13]
-        *   **External Factors**: We've included a basic `is_holiday` and `day_after_holiday` feature. For higher accuracy, integrate real-time weather data, local event calendars, and disease outbreak information (e.g., flu season intensity) as exogenous variables.[21, 22, 23]
-        *   **Cross-Validation**: For true robustness, implement time-series specific cross-validation (e.g., rolling window or expanding window validation) to rigorously evaluate model performance on unseen data and prevent data leakage.[16, 24]
-        *   **Hyperparameter Tuning**: Systematically tune model hyperparameters for both Prophet and XGBoost using techniques like Grid Search, Random Search, or Bayesian Optimization to find the optimal model configuration.[16, 25]
-        *   **Multivariate Approach**: The current setup trains independent hybrid models for each metric. For the interconnected ED metrics, a truly multivariate time series model (e.g., a multi-output LSTM or a VARMA-like approach) or a more sophisticated chained forecasting system (where forecasts of one metric inform another) would capture interdependencies more effectively, leading to more coherent predictions.[26, 27, 28]
-        *   **"Additional Capacity Open Morning"**: If this is a binary indicator, it might be better modeled as a classification problem, predicting the probability of surge, rather than a continuous value.[29] The output of this classification could then be used as an exogenous variable for the other metrics.
+        *   **Feature Engineering**: We've included various time-based features (hour, day of week, month, year, cyclical components) and basic lagged/rolling statistics. For a production system, more sophisticated lagged features (e.g., specific lags identified by autocorrelation plots [17, 10]), and rolling statistics (e.g., standard deviation, min/max over various windows) should be explored.[18, 8]
+        *   **External Factors**: We've included a basic `is_holiday` and `day_after_holiday` feature. For higher accuracy, integrate real-time weather data, local event calendars, and disease outbreak information (e.g., flu season intensity) as exogenous variables.[19, 20, 11]
+        *   **Cross-Validation**: For true robustness, implement time-series specific cross-validation (e.g., rolling window or expanding window validation) to rigorously evaluate model performance on unseen data and prevent data leakage.[14, 21, 22]
+        *   **Hyperparameter Tuning**: Systematically tune model hyperparameters for both Prophet and XGBoost using techniques like Grid Search, Random Search, or Bayesian Optimization to find the optimal model configuration.[14, 23]
+        *   **Multivariate Approach**: The current setup trains independent hybrid models for each metric. For the interconnected ED metrics, a truly multivariate time series model (e.g., a multi-output LSTM or a VARMA-like approach) or a more sophisticated chained forecasting system (where forecasts of one metric inform another) would capture interdependencies more effectively, leading to more coherent predictions.[17, 24, 25]
+        *   **"Additional Capacity Open Morning"**: If this is a binary indicator, it might be better modeled as a classification problem, predicting the probability of surge, rather than a continuous value.[18] The output of this classification could then be used as an exogenous variable for the other metrics.
         """)
 
     except Exception as e:
