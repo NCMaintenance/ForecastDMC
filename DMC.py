@@ -415,18 +415,121 @@ for hosp in h_list:
                 )
                 lgb_model_final.fit(full_train_X, full_train_y)
 
-                # Create future predictions (simplified approach)
+                # Create future predictions with recursive forecasting
                 last_known_date = df_feat['ds'].max()
                 future_dates = pd.date_range(start=last_known_date + pd.Timedelta(days=1), periods=future_days)
                 
-                # Use last known feature values for prediction
-                last_features = full_train_X.iloc[-1:].copy()
+                # Create extended dataframe for recursive forecasting
+                extended_df = df_feat.copy()
                 future_preds_lgb = []
                 
                 for i in range(future_days):
-                    pred = lgb_model_final.predict(last_features)[0]
+                    current_date = future_dates[i]
+                    
+                    # Create a row for the future date with date-based features
+                    future_row = pd.DataFrame({'ds': [current_date]})
+                    future_row['dow'] = future_row['ds'].dt.dayofweek
+                    future_row['month'] = future_row['ds'].dt.month
+                    future_row['quarter'] = future_row['ds'].dt.quarter
+                    future_row['weekofyear'] = future_row['ds'].dt.isocalendar().week.astype(int)
+                    future_row['dayofyear'] = future_row['ds'].dt.dayofyear
+                    future_row['is_weekend'] = (future_row['dow'] >= 5).astype(int)
+                    future_row['dow_sin'] = np.sin(2 * np.pi * future_row['dow'] / 7)
+                    future_row['dow_cos'] = np.cos(2 * np.pi * future_row['dow'] / 7)
+                    future_row['month_sin'] = np.sin(2 * np.pi * future_row['month'] / 12)
+                    future_row['month_cos'] = np.cos(2 * np.pi * future_row['month'] / 12)
+                    
+                    # Calculate lag and rolling features based on extended history
+                    for feature in selected_features:
+                        if feature in future_row.columns:
+                            continue  # Already calculated (date features)
+                            
+                        # Handle lag features
+                        if '_lag_' in feature:
+                            lag_num = int(feature.split('_lag_')[-1])
+                            base_col = feature.replace(f'_lag_{lag_num}', '')
+                            
+                            if base_col == 'target':
+                                # Use target values from extended_df
+                                if len(extended_df) >= lag_num:
+                                    future_row[feature] = extended_df['y'].iloc[-lag_num]
+                                else:
+                                    future_row[feature] = extended_df['y'].mean()
+                            else:
+                                # Use other column values
+                                if base_col in extended_df.columns and len(extended_df) >= lag_num:
+                                    future_row[feature] = extended_df[base_col].iloc[-lag_num]
+                                else:
+                                    future_row[feature] = 0
+                        
+                        # Handle rolling mean features
+                        elif '_roll_mean_' in feature:
+                            window = int(feature.split('_roll_mean_')[-1])
+                            base_col = feature.replace(f'_roll_mean_{window}', '')
+                            
+                            if base_col == 'target':
+                                if len(extended_df) >= window:
+                                    future_row[feature] = extended_df['y'].tail(window).mean()
+                                else:
+                                    future_row[feature] = extended_df['y'].mean()
+                            else:
+                                if base_col in extended_df.columns and len(extended_df) >= window:
+                                    future_row[feature] = extended_df[base_col].tail(window).mean()
+                                else:
+                                    future_row[feature] = 0
+                        
+                        # Handle rolling std features
+                        elif '_roll_std_' in feature:
+                            window = int(feature.split('_roll_std_')[-1])
+                            base_col = feature.replace(f'_roll_std_{window}', '')
+                            
+                            if base_col == 'target':
+                                if len(extended_df) >= window:
+                                    future_row[feature] = extended_df['y'].tail(window).std()
+                                else:
+                                    future_row[feature] = extended_df['y'].std()
+                            else:
+                                if base_col in extended_df.columns and len(extended_df) >= window:
+                                    future_row[feature] = extended_df[base_col].tail(window).std()
+                                else:
+                                    future_row[feature] = 0
+                        
+                        # Handle EWM features
+                        elif '_ewm_mean_' in feature:
+                            base_col = feature.replace('_ewm_mean_0.3', '')
+                            
+                            if base_col == 'target':
+                                if len(extended_df) > 0:
+                                    future_row[feature] = extended_df['y'].ewm(alpha=0.3).mean().iloc[-1]
+                                else:
+                                    future_row[feature] = extended_df['y'].mean()
+                            else:
+                                if base_col in extended_df.columns and len(extended_df) > 0:
+                                    future_row[feature] = extended_df[base_col].ewm(alpha=0.3).mean().iloc[-1]
+                                else:
+                                    future_row[feature] = 0
+                        
+                        # For any other features, use the last known value or zero
+                        else:
+                            if feature in extended_df.columns:
+                                future_row[feature] = extended_df[feature].iloc[-1]
+                            else:
+                                future_row[feature] = 0
+                    
+                    # Ensure all selected features are present
+                    for feature in selected_features:
+                        if feature not in future_row.columns:
+                            future_row[feature] = 0
+                    
+                    # Make prediction
+                    feature_values = future_row[selected_features].fillna(0)
+                    pred = lgb_model_final.predict(feature_values)[0]
                     future_preds_lgb.append(pred)
-                    # For simplicity, keep using the same feature values
+                    
+                    # Add this prediction to the extended dataframe for next iteration
+                    new_row = future_row.copy()
+                    new_row['y'] = pred
+                    extended_df = pd.concat([extended_df, new_row], ignore_index=True)
                 
                 future_preds_lgb = np.array(future_preds_lgb)
                 
