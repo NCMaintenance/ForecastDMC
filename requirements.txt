@@ -8,3 +8,4 @@ prophet
 plotly
 optuna
 seaborn
+statsmodels
