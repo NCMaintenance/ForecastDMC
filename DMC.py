@@ -14,6 +14,14 @@ warnings.filterwarnings('ignore')
 # ------------- ENHANCED FEATURE ENGINEERING ---------------
 
 @st.cache_data
+def get_ireland_holidays(years):
+    ir_holidays = holidays.Ireland(years=years)
+    # Add custom Feb holiday for example (Feb 15)
+    for year in years:
+        ir_holidays[f'{year}-02-15'] = "Custom Feb Bank Holiday"
+    return ir_holidays
+
+@st.cache_data
 def create_advanced_features(df, metric, ir_holidays):
     """Enhanced feature engineering with more sophisticated patterns"""
     temp_df = df.copy()
@@ -53,15 +61,16 @@ def create_advanced_features(df, metric, ir_holidays):
     prophet_df['y_volatility_7d'] = prophet_df['y'].rolling(7).std() / prophet_df['y'].rolling(7).mean()
     
     # Holiday effects (more sophisticated)
-    prophet_df['is_holiday'] = prophet_df.index.date.map(lambda x: 1 if x in ir_holidays else 0)
+    holiday_dates = set(ir_holidays.keys())
+    prophet_df['is_holiday'] = prophet_df.index.date.map(lambda x: 1 if x in holiday_dates else 0)
     prophet_df['days_since_holiday'] = 0
     prophet_df['days_until_holiday'] = 0
     
     # Calculate days to/from holidays
-    holiday_dates = pd.to_datetime(list(ir_holidays.keys()))
+    holiday_dates_dt = pd.to_datetime(list(holiday_dates))
     for idx in prophet_df.index:
-        past_holidays = holiday_dates[holiday_dates <= idx]
-        future_holidays = holiday_dates[holiday_dates > idx]
+        past_holidays = holiday_dates_dt[holiday_dates_dt <= idx]
+        future_holidays = holiday_dates_dt[holiday_dates_dt > idx]
         
         if len(past_holidays) > 0:
             prophet_df.loc[idx, 'days_since_holiday'] = (idx - past_holidays.max()).days
@@ -144,7 +153,7 @@ def train_enhanced_models(prophet_df, all_hospital_features, metric_name):
         # Merge system features
         system_df = all_hospital_features[metric_name]
         prophet_df = prophet_df.merge(system_df[['ds'] + system_features], on='ds', how='left')
-        prophet_df[system_features] = prophet_df[system_features].fillna(method='bfill').fillna(method='ffill')
+        prophet_df[system_features] = prophet_df[system_features].bfill().ffill()
         all_features.extend(system_features)
     
     # Filter features that exist in the dataframe
