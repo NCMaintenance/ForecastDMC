@@ -4,12 +4,7 @@ import xgboost as xgb
 import streamlit as st
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
-from utils import (
-    create_all_hospitals_features,
-    create_advanced_features,
-    load_metric_data,
-    METRICS
-)
+from utils import create_all_hospitals_features, create_advanced_features, load_metric_data, METRICS
 
 st.set_page_config(layout="wide")
 st.title("XGBoost-Only Forecast App")
