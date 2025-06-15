@@ -1,193 +1,112 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from prophet import Prophet
+from sklearn.multioutput import MultiOutputRegressor
 from lightgbm import LGBMRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from statsmodels.tsa.seasonal import seasonal_decompose
-import warnings
-from scipy.stats import pearsonr
-from datetime import datetime, timedelta
+from sklearn.metrics import mean_absolute_error
 import plotly.graph_objs as go
 
-warnings.filterwarnings("ignore")
+st.set_page_config(page_title="7-Day Forecasting", layout="wide")
 
-# --- Streamlit Page Configuration ---
-st.set_page_config(layout="wide")
-st.title("🏥 Advanced Hospital Forecasting with Auto-Optimization 📈")
+st.title("📈 7-Day Rolling Forecasting App")
+st.markdown("Upload your hospital tracker data to generate accurate 7-day forecasts.")
 
-# --- Sidebar Controls ---
-st.sidebar.header("⚙️ Configuration")
-uploaded = st.sidebar.file_uploader("📂 Upload Excel file", type="xlsx")
-hospitals = []
-targets = [
-    "Tracker8am", "Tracker2pm", "Tracker8pm",
-    "AdditionalCapacityOpen Morning",
-    "TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"
-]
+uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
-if not uploaded:
-    st.info("👋 Welcome! Please upload your Excel file using the sidebar to begin.")
-    st.stop()
-
-# --- Data Loading Function ---
-@st.cache_data
-def load_data(uploaded_file):
-    try:
+if uploaded_file:
+    # Load the data
+    if uploaded_file.name.endswith(".xlsx"):
         df = pd.read_excel(uploaded_file)
-        if 'Date' not in df.columns or 'Hospital' not in df.columns:
-            st.error("❌ The uploaded file must contain 'Date' and 'Hospital' columns.")
-            return None
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df = df.dropna(subset=['Date'])
-        df = df.sort_values('Date')
-        return df
-    except Exception as e:
-        st.error(f"⚠️ Error loading data: {e}")
-        return None
-
-df = load_data(uploaded)
-if df is None:
-    st.stop()
-
-hospitals = sorted(df['Hospital'].unique())
-sel_hosp = st.sidebar.selectbox("🏨 Hospital", ["All"] + hospitals)
-sel_target = st.sidebar.selectbox("🎯 Target", ["All"] + targets)
-future_days = 7  # Fixed at 7 days for the forecast
-run_forecast = st.sidebar.button("▶️ Run Forecast")
-
-if not run_forecast:
-    st.info("ℹ️ Configure your forecast parameters in the sidebar and click 'Run Forecast'.")
-    st.stop()
-
-# --- Helper Functions ---
-def calculate_optimal_lookback(df_length):
-    """Calculate optimal lookback period based on data length and seasonal patterns."""
-    if df_length >= 730:  # 2+ years
-        return min(90, df_length // 8)  # Up to 90 days lookback
-    elif df_length >= 365:  # 1+ year
-        return min(60, df_length // 6)  # Up to 60 days lookback
-    elif df_length >= 180:  # 6+ months
-        return min(45, df_length // 4)  # Up to 45 days lookback
     else:
-        return min(30, df_length // 3)  # Minimum viable lookback
+        df = pd.read_csv(uploaded_file)
 
-def create_comprehensive_features(df_input, target_col, max_lags=30):
-    """Create comprehensive feature set with lagged, rolling, and seasonal data."""
-    try:
-        df_feat = df_input.copy()
-        if 'Date' not in df_feat.columns:
-            raise ValueError("Date column not found")
-        
-        # Lag Features
-        for lag in range(1, max_lags + 1):
-            df_feat[f'{target_col}_lag_{lag}'] = df_feat[target_col].shift(lag)
-        
-        # Rolling Features
-        for window in [7, 14, 30]:
-            df_feat[f'{target_col}_roll_mean_{window}'] = df_feat[target_col].shift(1).rolling(window).mean()
-            df_feat[f'{target_col}_roll_std_{window}'] = df_feat[target_col].shift(1).rolling(window).std()
-        
-        # Date-based Features
-        df_feat['dow'] = df_feat['Date'].dt.dayofweek
-        df_feat['month'] = df_feat['Date'].dt.month
-        df_feat['quarter'] = df_feat['Date'].dt.quarter
-        df_feat['year'] = df_feat['Date'].dt.year
-        
-        return df_feat.dropna()
-    except Exception as e:
-        st.error(f"Error creating features: {e}")
-        return None
+    # Basic checks
+    if "Date" not in df.columns:
+        st.error("The uploaded file must contain a 'Date' column.")
+        st.stop()
 
-# --- Main Forecasting Logic ---
-if sel_hosp == "All":
-    selected_hospitals = hospitals
-else:
-    selected_hospitals = [sel_hosp]
+    # Parse dates
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date")
 
-if sel_target == "All":
-    selected_targets = targets
-else:
-    selected_targets = [sel_target]
+    hospitals = df["Hospital"].unique().tolist()
+    hospital_choice = st.selectbox("Select a Hospital (or All)", ["All"] + hospitals)
 
-results = []
+    if hospital_choice != "All":
+        df = df[df["Hospital"] == hospital_choice]
 
-for hosp in selected_hospitals:
-    st.header(f"🏨 Hospital: {hosp}")
-    df_hosp = df[df['Hospital'] == hosp].copy()
-    
-    for target in selected_targets:
-        if target not in df_hosp.columns:
-            st.warning(f"⚠️ Target '{target}' not found for hospital '{hosp}'. Skipping.")
-            continue
-        
-        st.subheader(f"🎯 Target: {target}")
-        df_target = df_hosp[['Date', target]].dropna().rename(columns={target: 'y'})
-        df_target = create_comprehensive_features(df_target, 'y', max_lags=calculate_optimal_lookback(len(df_target)))
-        
-        if df_target is None or len(df_target) < 50:
-            st.warning(f"⚠️ Not enough data to forecast '{target}' for hospital '{hosp}'. Skipping.")
-            continue
-        
-        # Split Data
-        train_size = int(len(df_target) * 0.8)
-        train_df = df_target.iloc[:train_size]
-        test_df = df_target.iloc[train_size:]
-        
-        # Train LightGBM
-        lgb_model = LGBMRegressor(random_state=42)
-        feature_cols = [col for col in train_df.columns if col not in ['Date', 'y']]
-        lgb_model.fit(train_df[feature_cols], train_df['y'])
-        
-        # Predictions for Test Data
-        lgb_pred = lgb_model.predict(test_df[feature_cols])
-        mse = mean_squared_error(test_df['y'], lgb_pred)
-        rmse = np.sqrt(mse)  # RMSE calculation
-        mae = mean_absolute_error(test_df['y'], lgb_pred)
-        
-        # Ensure predictions are non-negative and rounded
-        lgb_pred = np.maximum(0, np.round(lgb_pred, 2))
-        
-        # Forecast for the next 7 days
-        future_dates = pd.date_range(start=df_target['Date'].max() + timedelta(days=1), periods=future_days)
-        future_features = pd.DataFrame({'Date': future_dates})
-        for col in feature_cols:
-            if col.endswith('_lag_1'):
-                future_features[col] = df_target[col].iloc[-1]
-            else:
-                future_features[col] = 0  # Default values for simplicity
-        
-        future_pred = lgb_model.predict(future_features[feature_cols])
-        future_pred = np.maximum(0, np.round(future_pred, 2))  # Clamp to non-negative values
-        
-        # Confidence intervals (assume ±10% for simplicity)
-        lower_bound = np.maximum(0, np.round(future_pred * 0.9, 2))
-        upper_bound = np.round(future_pred * 1.1, 2)
-        
-        # Results Visualization
+    df["Tracker8pm"].fillna(method="ffill", inplace=True)
+
+    # Targets
+    targets = [
+        'Tracker8am', 'Tracker2pm', 'Tracker8pm',
+        'AdditionalCapacityOpen Morning',
+        'TimeTotal_8am', 'TimeTotal_2pm', 'TimeTotal_8pm'
+    ]
+
+    # Date-based features
+    df["dayofweek"] = df["Date"].dt.dayofweek
+    df["month"] = df["Date"].dt.month
+    df["weekofyear"] = df["Date"].dt.isocalendar().week.astype(int)
+
+    # Convert categoricals
+    for cat in ['Hospital', 'Hospital Group Name', 'DayGAR']:
+        if cat in df.columns:
+            df[cat] = df[cat].astype('category')
+
+    # Lag and rolling features
+    lags = [1, 2, 3, 5, 7]
+    windows = [3, 7]
+    for col in targets:
+        for lag in lags:
+            df[f"{col}_lag_{lag}"] = df.groupby("Hospital")[col].shift(lag)
+        for win in windows:
+            df[f"{col}_rollmean_{win}"] = df.groupby("Hospital")[col].shift(1).rolling(win).mean()
+
+    df = df.dropna()
+
+    # Final dataset
+    feature_cols = [c for c in df.columns if c not in targets + ['Date']]
+    df_encoded = pd.get_dummies(df, drop_first=True)
+
+    # Split
+    train = df_encoded.iloc[:-7]
+    test = df_encoded.iloc[-7:]
+
+    X_train = train[feature_cols]
+    y_train = train[targets]
+    X_test = test[feature_cols]
+    y_test = test[targets]
+
+    # Model
+    model = MultiOutputRegressor(LGBMRegressor(n_estimators=200, learning_rate=0.05, random_state=42))
+    model.fit(X_train, y_train)
+
+    # Rolling predictions
+    preds, actuals = [], []
+    for i in range(7):
+        x_row = X_test.iloc[[i]]
+        pred = model.predict(x_row)[0]
+        preds.append(pred)
+        actuals.append(y_test.iloc[i].values)
+
+    forecast_df = pd.DataFrame(preds, columns=targets, index=test["Date"])
+    actual_df = pd.DataFrame(actuals, columns=targets, index=test["Date"])
+
+    # Metrics
+    mae = {col: mean_absolute_error(actual_df[col], forecast_df[col]) for col in targets}
+
+    # Show
+    st.subheader("📋 7-Day Forecast Table")
+    st.dataframe(forecast_df.style.format("{:.1f}"))
+
+    st.subheader("📉 Forecast vs Actual (Plotly)")
+    for col in targets:
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=test_df['Date'], y=test_df['y'], mode='lines+markers', name='Actual'))
-        fig.add_trace(go.Scatter(x=test_df['Date'], y=lgb_pred, mode='lines+markers', name='Predicted'))
-        fig.update_layout(title=f"Forecast for {target} ({hosp})", xaxis_title="Date", yaxis_title="Value")
-        st.plotly_chart(fig)
-        
-        # Display Future Forecast Table
-        st.write(f"🔮 **7-Day Forecast for {target} ({hosp}):**")
-        forecast_table = pd.DataFrame({
-            'Date': future_dates,
-            'Forecast': future_pred,
-            'Lower Bound': lower_bound,
-            'Upper Bound': upper_bound
-        })
-        st.dataframe(forecast_table)
-        
-        results.append({'Hospital': hosp, 'Target': target, 'MAE': mae, 'RMSE': rmse})
+        fig.add_trace(go.Scatter(x=forecast_df.index, y=forecast_df[col], mode='lines+markers', name='Forecast'))
+        fig.add_trace(go.Scatter(x=actual_df.index, y=actual_df[col], mode='lines+markers', name='Actual'))
+        fig.update_layout(title=f"{col} Forecast", xaxis_title="Date", yaxis_title=col)
+        st.plotly_chart(fig, use_container_width=True)
 
-# --- Results Summary ---
-if results:
-    st.header("📊 Summary of Results")
-    results_df = pd.DataFrame(results)
-    st.dataframe(results_df)
-else:
-    st.info("No valid results to display.")
+    st.subheader("📊 MAE Per Target")
+    st.table(pd.DataFrame.from_dict(mae, orient='index', columns=["MAE"]).style.format("{:.2f}"))
