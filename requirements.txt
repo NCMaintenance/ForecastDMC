@@ -9,4 +9,3 @@ plotly
 optuna
 seaborn
 statsmodels
-u8darts[all]
