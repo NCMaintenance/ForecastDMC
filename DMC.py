@@ -54,32 +54,34 @@ if not run:
 
 # --- Feature Engineering ---
 def create_advanced_features(df_input, target_col, all_hospital_cols, max_lags=7):
-    """Create comprehensive feature set with leak prevention for all hospital metrics"""
+    """
+    Create comprehensive feature set.
+    This function is now robust and checks for column existence before creating features.
+    """
     df_feat = df_input.copy().rename(columns={'ds': 'Date'}) # Use 'Date' internally
     
-    predictor_cols = [col for col in all_hospital_cols if col != target_col and col in df_feat.columns]
-    all_feature_cols = predictor_cols + [target_col]
+    # Combine predictor columns and the target column for feature generation
+    all_feature_cols = all_hospital_cols + [target_col]
     
-    # Lag features (shifted to prevent data leakage)
     for col in all_feature_cols:
-        col_name = 'target' if col == target_col else col
-        for lag in range(1, max_lags + 1):
-            df_feat[f'{col_name}_lag_{lag}'] = df_feat[col].shift(lag)
-    
-    # Rolling statistics
-    windows = [3, 7, 14]
-    for col in all_feature_cols:
-        col_name = 'target' if col == target_col else col
-        for window in windows:
-            df_feat[f'{col_name}_roll_mean_{window}'] = df_feat[col].shift(1).rolling(window=window, min_periods=1).mean()
-            df_feat[f'{col_name}_roll_std_{window}'] = df_feat[col].shift(1).rolling(window=window, min_periods=1).std()
+        # --- FIX: Check if the source column exists before creating features from it ---
+        if col in df_feat.columns:
+            col_name = 'target' if col == target_col else col
+            
+            # Lag features
+            for lag in range(1, max_lags + 1):
+                df_feat[f'{col_name}_lag_{lag}'] = df_feat[col].shift(lag)
+            
+            # Rolling statistics
+            windows = [3, 7, 14]
+            for window in windows:
+                df_feat[f'{col_name}_roll_mean_{window}'] = df_feat[col].shift(1).rolling(window=window, min_periods=1).mean()
+                df_feat[f'{col_name}_roll_std_{window}'] = df_feat[col].shift(1).rolling(window=window, min_periods=1).std()
 
-    # Exponentially Weighted Mean
-    for col in all_feature_cols:
-        col_name = 'target' if col == target_col else col
-        df_feat[f'{col_name}_ewm_mean_0.3'] = df_feat[col].shift(1).ewm(alpha=0.3).mean()
+            # Exponentially Weighted Mean
+            df_feat[f'{col_name}_ewm_mean_0.3'] = df_feat[col].shift(1).ewm(alpha=0.3).mean()
 
-    # Date-based features
+    # Date-based features (always created)
     df_feat['dow'] = df_feat['Date'].dt.dayofweek
     df_feat['month'] = df_feat['Date'].dt.month
     df_feat['quarter'] = df_feat['Date'].dt.quarter
@@ -144,12 +146,13 @@ for hosp in h_list:
             st.warning("⚠️ Target data not available or is all null. Skipping.")
             continue
 
+        # Get all other available metrics to use as features
         available_targets = [col for col in targets if col in df_h.columns and not df_h[col].isna().all()]
         df2 = df_h[['Date'] + available_targets].rename(columns={'Date': 'ds', tgt: 'y'})
         
         # --- Feature Engineering & Data Splitting ---
         df_feat = create_advanced_features(df2, 'y', available_targets, max_lags=7)
-        df_feat = df_feat.dropna(subset=['y']) # Ensure target is not null
+        df_feat = df_feat.dropna(subset=['y'])
 
         n = len(df_feat)
         if n < 60:
@@ -232,32 +235,31 @@ for hosp in h_list:
             fig_imp.update_layout(title="Top 20 Feature Importances", yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_imp, use_container_width=True)
 
-        # --- Future Forecasting (Walk-Forward) ---
+        # --- Future Forecasting ---
         st.write(f"🔮 **Generating Future Forecasts for the next {future_days} days...**")
-        future_preds_lgb = []
-        last_features = X_train.iloc[-1:].copy() # Use last known good features
         
-        # A simplified walk-forward: we retrain on each step for robustness
-        # In a real high-performance scenario, you'd update features iteratively.
+        # Train final model on all available data
         full_train_X = df_feat[selected_features].fillna(0)
         full_train_y = df_feat['y']
-        
         lgb_model.fit(full_train_X, full_train_y)
 
+        # Create a template for future dates
         last_known_date = df_feat['ds'].max()
         future_dates = pd.to_datetime(pd.date_range(start=last_known_date + pd.Timedelta(days=1), periods=future_days))
-
-        # This part is complex; using the last available feature set as a proxy for future steps
-        # A more advanced version would re-calculate features based on predictions.
         future_df_template = pd.DataFrame({'ds': future_dates})
-        future_df = create_advanced_features(future_df_template, 'y', [], max_lags=1) # Create date features
-        
-        # Carry forward last known values for non-date features
+
+        # Use the robust create_advanced_features to generate date-based features
+        future_features_df = create_advanced_features(future_df_template, 'y', [], max_lags=1)
+
+        # Carry forward the last known values for non-date based features
         for col in selected_features:
-            if col not in future_df.columns:
-                 future_df[col] = full_train_X[col].iloc[-1]
+            if col not in future_features_df.columns:
+                future_features_df[col] = full_train_X[col].iloc[-1]
         
-        future_preds_lgb = lgb_model.predict(future_df[selected_features].fillna(0))
+        # Ensure column order is the same as training
+        future_features_df = future_features_df[selected_features].fillna(0)
+
+        future_preds_lgb = lgb_model.predict(future_features_df)
         
         # --- Future Forecast Visualization & Table ---
         fig_future = go.Figure()
@@ -265,7 +267,6 @@ for hosp in h_list:
         fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds_lgb, mode='lines+markers', name='LightGBM Forecast', line=dict(color='red')))
         
         if prophet_future_forecast is not None:
-             # Add Prophet forecast with confidence intervals
             fig_future.add_trace(go.Scatter(x=prophet_future_forecast['ds'], y=prophet_future_forecast['yhat'], mode='lines', name='Prophet Forecast', line=dict(color='green', dash='dot')))
             fig_future.add_trace(go.Scatter(x=prophet_future_forecast['ds'], y=prophet_future_forecast['yhat_upper'], fill=None, mode='lines', line_color='rgba(0,176,246,0.2)', showlegend=False))
             fig_future.add_trace(go.Scatter(x=prophet_future_forecast['ds'], y=prophet_future_forecast['yhat_lower'], fill='tonexty', mode='lines', line_color='rgba(0,176,246,0.2)', name='Prophet 95% CI'))
@@ -292,7 +293,7 @@ for hosp in h_list:
                 st.pyplot(fig_prophet_comp)
 
 # --- Consolidated Summary ---
-if len(all_results) > 1 and sel_hosp == "All" or sel_target == "All":
+if len(all_results) > 1 and (sel_hosp == "All" or sel_target == "All"):
     st.header("📋 Consolidated Future Forecast Summary", divider='rainbow')
     
     summary_list = []
@@ -300,7 +301,7 @@ if len(all_results) > 1 and sel_hosp == "All" or sel_target == "All":
         days = [1, 3, 7]
         row = {'Hospital': res['Hospital'], 'Target': res['Target']}
         for day in days:
-            if day <= len(res['LightGBM Forecast']):
+            if 'LightGBM Forecast' in res and day <= len(res['LightGBM Forecast']):
                 row[f'Day {day} Forecast (LGBM)'] = res['LightGBM Forecast'][day-1]
         summary_list.append(row)
     
