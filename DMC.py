@@ -6,6 +6,10 @@ from datetime import datetime
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
+from pandas.tseries.offsets import DateOffset
+from dateutil.rrule import MO
+import shap
+import matplotlib.pyplot as plt
 
 # --- Define Irish Bank Holidays ---
 class IrishBankHolidays(AbstractHolidayCalendar):
@@ -13,17 +17,17 @@ class IrishBankHolidays(AbstractHolidayCalendar):
         Holiday("New Year's Day", month=1, day=1, observance=nearest_workday),
         Holiday("St. Brigid's Day", month=2, day=1, observance=nearest_workday),
         Holiday("St. Patrick's Day", month=3, day=17, observance=nearest_workday),
-        Holiday("Easter Monday", month=4, day=1, offset=pd.DateOffset(weekday=0)),  # Will adjust manually later
-        Holiday("May Day", month=5, day=1, offset=pd.DateOffset(weekday=0(1))),
-        Holiday("June Bank Holiday", month=6, day=1, offset=pd.DateOffset(weekday=0(1))),
-        Holiday("August Bank Holiday", month=8, day=1, offset=pd.DateOffset(weekday=0(1))),
-        Holiday("October Bank Holiday", month=10, day=1, offset=pd.DateOffset(weekday=0(-1))),
+        Holiday("May Day", month=5, day=1, offset=DateOffset(weekday=MO(1))),
+        Holiday("June Bank Holiday", month=6, day=1, offset=DateOffset(weekday=MO(1))),
+        Holiday("August Bank Holiday", month=8, day=1, offset=DateOffset(weekday=MO(1))),
+        Holiday("October Bank Holiday", month=10, day=1, offset=DateOffset(weekday=MO(-1))),
         Holiday("Christmas Day", month=12, day=25),
         Holiday("St. Stephen's Day", month=12, day=26),
     ]
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting (Ireland)")
+st.title("🇮🇪 Emergency Department Forecasting (Ireland)")
+
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
 
 if uploaded_file:
@@ -40,7 +44,7 @@ if uploaded_file:
         'AdditionalCapacityOpen Morning': 'Additional_Capacity'
     })
 
-    # Forward-fill Additional Capacity across time points of the same day
+    # Fill Additional Capacity across the day
     df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
 
     # Reshape to long format
@@ -71,22 +75,18 @@ if uploaded_file:
     holidays = calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max())
     df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
 
-    # Encode hospital as category
+    # Encode hospital
     df_long['Hospital_Code'] = df_long['Hospital'].astype('category').cat.codes
 
-    # Filter for ED only
-    df_ed = df_long[df_long['Metric'] == 'ED']
-
-    # Create lag features
+    # -------------------------
+    # ED Forecasting
+    # -------------------------
+    df_ed = df_long[df_long['Metric'] == 'ED'].copy()
     df_ed = df_ed.sort_values(by=['Hospital', 'Datetime'])
-    df_ed['Lag_1'] = df_ed.groupby('Hospital')['Value'].shift(1)
-    df_ed['Lag_2'] = df_ed.groupby('Hospital')['Value'].shift(2)
-    df_ed['Lag_3'] = df_ed.groupby('Hospital')['Value'].shift(3)
+    for i in range(1, 4):
+        df_ed[f'Lag_{i}'] = df_ed.groupby('Hospital')['Value'].shift(i)
 
-    # Drop rows with NA lag values
-    df_ed = df_ed.dropna()
-
-    # Features and target
+    df_ed.dropna(inplace=True)
     features = [
         'Hour', 'DayOfWeek', 'IsWeekend', 'Hour_sin', 'Hour_cos',
         'Day_sin', 'Day_cos', 'IsHoliday', 'Hospital_Code',
@@ -94,23 +94,69 @@ if uploaded_file:
     ]
     X = df_ed[features]
     y = df_ed['Value']
-
-    # Train/test split
     X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
 
-    # Train LightGBM
     model = lgb.LGBMRegressor()
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
-
-    # Show results
-    st.subheader("Model Performance")
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+
+    st.subheader("📈 ED Model Performance")
     st.write(f"RMSE: {rmse:.2f}")
 
-    # Show predictions
-    df_ed_test = df_ed.iloc[y_test.index]
-    df_ed_test = df_ed_test.copy()
+    df_ed_test = df_ed.iloc[y_test.index].copy()
     df_ed_test['Predicted'] = y_pred
-    st.subheader("Sample Predictions")
     st.dataframe(df_ed_test[['Datetime', 'Hospital', 'Value', 'Predicted']].head(20))
+
+    st.download_button(
+        "📥 Download ED Predictions as CSV",
+        df_ed_test[['Datetime', 'Hospital', 'Value', 'Predicted']].to_csv(index=False).encode(),
+        file_name="ed_predictions.csv",
+        mime="text/csv"
+    )
+
+    # SHAP Plot
+    st.subheader("🧠 SHAP Feature Importance (ED)")
+    explainer = shap.Explainer(model)
+    shap_values = explainer(X_test)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    shap.plots.bar(shap_values, max_display=10, show=False)
+    st.pyplot(fig)
+
+    # -------------------------
+    # Trolley Forecasting
+    # -------------------------
+    st.subheader("🛒 Trolley Model Performance")
+    df_trolley = df_long[df_long['Metric'] == 'Trolley'].copy()
+    df_trolley = df_trolley.sort_values(by=['Hospital', 'Datetime'])
+    for i in range(1, 4):
+        df_trolley[f'Lag_{i}'] = df_trolley.groupby('Hospital')['Value'].shift(i)
+    df_trolley.dropna(inplace=True)
+
+    X_t = df_trolley[features]
+    y_t = df_trolley['Value']
+    X_train_t, X_test_t, y_train_t, y_test_t = train_test_split(X_t, y_t, shuffle=False, test_size=0.2)
+
+    model_t = lgb.LGBMRegressor()
+    model_t.fit(X_train_t, y_train_t)
+    y_pred_t = model_t.predict(X_test_t)
+    rmse_t = np.sqrt(mean_squared_error(y_test_t, y_pred_t))
+    st.write(f"Trolley RMSE: {rmse_t:.2f}")
+
+    df_t_test = df_trolley.iloc[y_test_t.index].copy()
+    df_t_test['Predicted'] = y_pred_t
+    st.dataframe(df_t_test[['Datetime', 'Hospital', 'Value', 'Predicted']].head(20))
+
+    st.download_button(
+        "📥 Download Trolley Predictions as CSV",
+        df_t_test[['Datetime', 'Hospital', 'Value', 'Predicted']].to_csv(index=False).encode(),
+        file_name="trolley_predictions.csv",
+        mime="text/csv"
+    )
+
+    st.subheader("🧠 SHAP Feature Importance (Trolley)")
+    explainer_t = shap.Explainer(model_t)
+    shap_values_t = explainer_t(X_test_t)
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    shap.plots.bar(shap_values_t, max_display=10, show=False)
+    st.pyplot(fig2)
