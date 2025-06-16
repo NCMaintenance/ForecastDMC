@@ -6,6 +6,8 @@ import holidays
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.feature_selection import SelectKBest, f_regression
+from scipy.stats import pearsonr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
@@ -18,7 +20,6 @@ warnings.filterwarnings('ignore')
 
 # ------------- SPEED OPTIMIZATIONS ---------------
 
-# Use Numba JIT compilation for numerical computations
 @jit(nopython=True)
 def fast_rolling_stats(values, window):
     """Fast rolling statistics using Numba"""
@@ -26,7 +27,6 @@ def fast_rolling_stats(values, window):
     if n == 0:
         return 0.0, 0.0, 0.0, 0.0, 0.0
     
-    # Get the window of data
     start_idx = max(0, n - window)
     window_data = values[start_idx:n]
     
@@ -79,13 +79,162 @@ def fast_volatility(values, window):
     std_val = np.std(window_data)
     return std_val / mean_val
 
-# ------------- ENHANCED FEATURE ENGINEERING (OPTIMIZED) ---------------
+@jit(nopython=True)
+def fast_trend_calculation(values, window=7):
+    """Calculate trend slope over a window"""
+    n = len(values)
+    if n < window:
+        window_data = values
+        x_data = np.arange(len(window_data))
+    else:
+        window_data = values[n-window:n]
+        x_data = np.arange(window)
+    
+    if len(window_data) < 2:
+        return 0.0
+    
+    # Simple linear regression slope
+    n_points = len(window_data)
+    sum_x = np.sum(x_data)
+    sum_y = np.sum(window_data)
+    sum_xy = np.sum(x_data * window_data)
+    sum_x2 = np.sum(x_data * x_data)
+    
+    denominator = n_points * sum_x2 - sum_x * sum_x
+    if denominator == 0:
+        return 0.0
+    
+    slope = (n_points * sum_xy - sum_x * sum_y) / denominator
+    return slope
+
+# ------------- CORRELATION ANALYSIS AND FEATURE SELECTION ---------------
+
+def analyze_feature_correlations(feature_df, target_col='y', correlation_threshold=0.1):
+    """Analyze correlations and select best features"""
+    
+    # Calculate all features first
+    all_features = []
+    
+    # Basic temporal features
+    temporal_features = [
+        'year', 'month', 'day', 'dayofweek', 'hour', 'week_of_year', 
+        'quarter', 'day_of_year', 'hour_sin', 'hour_cos', 'dow_sin', 
+        'dow_cos', 'month_sin', 'month_cos', 'quarter_sin', 'quarter_cos'
+    ]
+    all_features.extend(temporal_features)
+    
+    # Pattern features
+    pattern_features = [
+        'is_weekend', 'is_monday', 'is_friday', 'is_spring', 'is_summer', 
+        'is_autumn', 'is_winter', 'weekend_evening', 'friday_evening'
+    ]
+    all_features.extend(pattern_features)
+    
+    # All possible lag features (1-30 days)
+    lag_features = [f'y_lag{i}' for i in range(1, 31)]
+    all_features.extend(lag_features)
+    
+    # All possible rolling features
+    rolling_windows = [3, 7, 14, 21, 30, 60, 90]
+    rolling_stats = ['mean', 'std', 'max', 'min', 'median']
+    for window in rolling_windows:
+        for stat in rolling_stats:
+            all_features.append(f'y_rolling_{stat}_{window}')
+    
+    # EMA features
+    ema_alphas = [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
+    for alpha in ema_alphas:
+        all_features.append(f'y_ema_{alpha}')
+    
+    # Percentage change features
+    pct_periods = [1, 2, 3, 7, 14, 21, 30]
+    for period in pct_periods:
+        all_features.append(f'y_pct_change_{period}d')
+    
+    # Volatility features
+    vol_windows = [7, 14, 30]
+    for window in vol_windows:
+        all_features.append(f'y_volatility_{window}')
+    
+    # Trend features
+    trend_windows = [3, 7, 14, 21]
+    for window in trend_windows:
+        all_features.append(f'y_trend_{window}')
+    
+    # Other features
+    other_features = ['is_holiday', 'trend']
+    all_features.extend(other_features)
+    
+    # Check which features exist in the dataframe
+    available_features = [f for f in all_features if f in feature_df.columns]
+    
+    # Calculate correlations
+    correlations = {}
+    target_values = feature_df[target_col].dropna()
+    
+    for feature in available_features:
+        if feature in feature_df.columns:
+            feature_values = feature_df[feature]
+            
+            # Align the data (remove NaN pairs)
+            aligned_data = pd.DataFrame({
+                'target': target_values,
+                'feature': feature_values
+            }).dropna()
+            
+            if len(aligned_data) > 10:  # Need sufficient data points
+                try:
+                    corr, p_value = pearsonr(aligned_data['target'], aligned_data['feature'])
+                    correlations[feature] = {
+                        'correlation': abs(corr),
+                        'p_value': p_value,
+                        'raw_correlation': corr
+                    }
+                except:
+                    correlations[feature] = {
+                        'correlation': 0.0,
+                        'p_value': 1.0,
+                        'raw_correlation': 0.0
+                    }
+    
+    # Sort by correlation strength
+    sorted_features = sorted(correlations.items(), 
+                           key=lambda x: x[1]['correlation'], 
+                           reverse=True)
+    
+    # Select features above threshold
+    selected_features = []
+    correlation_info = []
+    
+    for feature, corr_info in sorted_features:
+        if corr_info['correlation'] >= correlation_threshold and corr_info['p_value'] < 0.05:
+            selected_features.append(feature)
+            correlation_info.append({
+                'feature': feature,
+                'correlation': corr_info['raw_correlation'],
+                'abs_correlation': corr_info['correlation'],
+                'p_value': corr_info['p_value']
+            })
+    
+    # Ensure we have at least some essential features
+    essential_features = ['y_lag1', 'y_lag7', 'dayofweek', 'hour', 'month']
+    for feature in essential_features:
+        if feature in available_features and feature not in selected_features:
+            selected_features.append(feature)
+            if feature in correlations:
+                correlation_info.append({
+                    'feature': feature,
+                    'correlation': correlations[feature]['raw_correlation'],
+                    'abs_correlation': correlations[feature]['correlation'],
+                    'p_value': correlations[feature]['p_value']
+                })
+    
+    return selected_features[:50], pd.DataFrame(correlation_info)  # Limit to top 50 features
 
 @st.cache_data
 def get_ireland_holidays(years):
     """Cached holiday calculation"""
     ir_holidays = holidays.Ireland(years=years)
-    # Add custom Feb holiday for example (Feb 15)
     for year in years:
         ir_holidays[f'{year}-02-15'] = "Custom Feb Bank Holiday"
     return ir_holidays
@@ -104,7 +253,7 @@ def create_temporal_features(dates):
     df['quarter'] = dates.quarter
     df['day_of_year'] = dates.dayofyear
     
-    # Cyclical encoding (vectorized)
+    # Cyclical encoding
     df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
     df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
@@ -132,35 +281,54 @@ def create_temporal_features(dates):
     return df
 
 @st.cache_data
-def create_optimized_features(df, metric, ir_holidays):
-    """Optimized feature engineering with reduced feature set"""
+def create_comprehensive_features(df, metric, ir_holidays):
+    """Create comprehensive feature set for correlation analysis"""
     temp_df = df.copy()
     temp_df['ds'] = pd.to_datetime(temp_df['Date'])
     feature_df = temp_df[['ds', metric]].rename(columns={metric: 'y'}).dropna().set_index('ds')
     
-    # Create temporal features (vectorized)
+    # Create temporal features
     temporal_features = create_temporal_features(feature_df.index)
     feature_df = pd.concat([feature_df, temporal_features], axis=1)
     
-    # Reduced set of lag features (most important ones)
-    important_lags = [1, 7, 14]  # Reduced from [1, 2, 3, 7, 14, 21, 30]
-    for lag in important_lags:
+    # Create ALL possible lag features
+    for lag in range(1, 31):  # 1 to 30 days
         feature_df[f'y_lag{lag}'] = feature_df['y'].shift(lag)
     
-    # Reduced rolling windows (most important ones)
-    important_windows = [7, 30]  # Reduced from [3, 7, 14, 30, 60]
-    for window in important_windows:
+    # Create ALL possible rolling features
+    rolling_windows = [3, 7, 14, 21, 30, 60, 90]
+    for window in rolling_windows:
         feature_df[f'y_rolling_mean_{window}'] = feature_df['y'].rolling(window, min_periods=1).mean()
         feature_df[f'y_rolling_std_{window}'] = feature_df['y'].rolling(window, min_periods=1).std()
+        feature_df[f'y_rolling_max_{window}'] = feature_df['y'].rolling(window, min_periods=1).max()
+        feature_df[f'y_rolling_min_{window}'] = feature_df['y'].rolling(window, min_periods=1).min()
+        feature_df[f'y_rolling_median_{window}'] = feature_df['y'].rolling(window, min_periods=1).median()
     
-    # Essential EMA (reduced)
-    feature_df['y_ema_0.3'] = feature_df['y'].ewm(alpha=0.3).mean()
+    # Create ALL EMA features
+    ema_alphas = [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
+    for alpha in ema_alphas:
+        feature_df[f'y_ema_{alpha}'] = feature_df['y'].ewm(alpha=alpha).mean()
     
-    # Essential percentage changes
-    feature_df['y_pct_change_1d'] = feature_df['y'].pct_change(1)
-    feature_df['y_pct_change_7d'] = feature_df['y'].pct_change(7)
+    # Create ALL percentage change features
+    pct_periods = [1, 2, 3, 7, 14, 21, 30]
+    for period in pct_periods:
+        feature_df[f'y_pct_change_{period}d'] = feature_df['y'].pct_change(period)
     
-    # Holiday effects (simplified)
+    # Create volatility features
+    vol_windows = [7, 14, 30]
+    for window in vol_windows:
+        rolling_std = feature_df['y'].rolling(window, min_periods=1).std()
+        rolling_mean = feature_df['y'].rolling(window, min_periods=1).mean()
+        feature_df[f'y_volatility_{window}'] = rolling_std / (rolling_mean + 1e-8)
+    
+    # Create trend features (slope over different windows)
+    trend_windows = [3, 7, 14, 21]
+    for window in trend_windows:
+        feature_df[f'y_trend_{window}'] = feature_df['y'].rolling(window, min_periods=2).apply(
+            lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) >= 2 else 0
+        )
+    
+    # Holiday effects
     holiday_dates = set(pd.to_datetime(list(ir_holidays.keys())).date)
     
     if hasattr(feature_df.index, 'date'):
@@ -170,99 +338,81 @@ def create_optimized_features(df, metric, ir_holidays):
     
     feature_df['is_holiday'] = date_series.map(lambda x: 1 if x in holiday_dates else 0)
     
-    # Trend features
+    # Global trend
     feature_df['trend'] = np.arange(len(feature_df))
     
-    # Clean up NaN values efficiently
+    # Clean up NaN values
     feature_df = feature_df.replace([np.inf, -np.inf], np.nan)
     
-    # Fast NaN filling
+    # Fill NaN values strategically
     numeric_cols = feature_df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
         if col == 'y':
             continue
-        if 'pct_change' in col:
+        if 'pct_change' in col or 'trend' in col:
             feature_df[col] = feature_df[col].fillna(0)
         else:
             feature_df[col] = feature_df[col].fillna(feature_df[col].median())
     
     return feature_df.reset_index()
 
-def parallel_feature_creation(args):
-    """Helper function for parallel processing"""
-    df_filtered, metric_name, ir_holidays = args
-    try:
-        return metric_name, create_optimized_features(df_filtered, metric_name, ir_holidays)
-    except Exception as e:
-        return metric_name, None
-
 @st.cache_data
-def train_optimized_xgboost(feature_df, metric_name):
-    """Optimized XGBoost training with reduced complexity"""
+def train_enhanced_xgboost(feature_df, metric_name, correlation_threshold=0.1):
+    """Enhanced XGBoost training with correlation-based feature selection"""
     
-    # Reduced feature set for speed
-    essential_features = [
-        'year', 'month', 'dayofweek', 'hour', 'quarter',
-        'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'month_sin', 'month_cos',
-        'y_lag1', 'y_lag7', 'y_lag14',
-        'y_rolling_mean_7', 'y_rolling_mean_30', 'y_rolling_std_7', 'y_rolling_std_30',
-        'y_ema_0.3', 'y_pct_change_1d', 'y_pct_change_7d',
-        'is_holiday', 'is_weekend', 'is_friday', 'weekend_evening', 'friday_evening',
-        'is_spring', 'is_summer', 'is_autumn', 'is_winter',
-        'trend'
-    ]
-    
-    # Filter available features
-    available_features = [f for f in essential_features if f in feature_df.columns]
+    # Perform correlation analysis and feature selection
+    selected_features, correlation_info = analyze_feature_correlations(
+        feature_df, 'y', correlation_threshold
+    )
     
     if len(feature_df) < 30:
         raise ValueError(f"Insufficient data: {len(feature_df)} rows")
     
-    # Prepare data
-    model_data = feature_df[['ds', 'y'] + available_features].copy()
+    # Prepare data with selected features
+    model_data = feature_df[['ds', 'y'] + selected_features].copy()
     model_data = model_data.dropna()
     
     if len(model_data) < 20:
         raise ValueError("Too much data lost after cleaning")
     
-    X = model_data[available_features]
+    X = model_data[selected_features]
     y = model_data['y']
     
-    # Fast scaling
+    # Scale features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    # Optimized XGBoost parameters for speed
+    # Enhanced XGBoost parameters
     xgb_model = xgb.XGBRegressor(
-        n_estimators=100,  # Reduced from 300
-        max_depth=6,       # Reduced from 8
-        learning_rate=0.1, # Increased for faster convergence
+        n_estimators=200,
+        max_depth=7,
+        learning_rate=0.08,
         subsample=0.8,
         colsample_bytree=0.8,
         reg_alpha=0.1,
         reg_lambda=0.1,
         random_state=42,
-        n_jobs=-1,         # Use all CPU cores
-        tree_method='hist', # Faster tree method
-        early_stopping_rounds=10  # Reduced from 30
+        n_jobs=-1,
+        tree_method='hist',
+        early_stopping_rounds=20
     )
     
-    # Simple train/validation split for speed
-    train_size = int(0.85 * len(X_scaled))  # Use more data for training
+    # Train/validation split
+    train_size = int(0.85 * len(X_scaled))
     X_train, X_val = X_scaled[:train_size], X_scaled[train_size:]
     y_train, y_val = y[:train_size], y[train_size:]
     
     # Train with early stopping
     xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     
-    return xgb_model, scaler, available_features, model_data
+    return xgb_model, scaler, selected_features, model_data, correlation_info
 
-# ------------- FAST ITERATIVE FORECASTING ---------------
+# ------------- TREND-AWARE ITERATIVE FORECASTING ---------------
 
-def fast_iterative_forecast(xgb_model, scaler, features, model_data, forecast_periods=14):
-    """Optimized iterative forecasting with proper feature updating"""
+def trend_aware_iterative_forecast(xgb_model, scaler, features, model_data, forecast_periods=14):
+    """Enhanced iterative forecasting that maintains trends"""
     
-    # Pre-allocate arrays for speed
+    # Pre-allocate arrays
     forecasts = np.zeros(forecast_periods)
     forecast_dates = []
     
@@ -270,72 +420,122 @@ def fast_iterative_forecast(xgb_model, scaler, features, model_data, forecast_pe
     historical_values = model_data['y'].values
     last_date = pd.to_datetime(model_data['ds'].iloc[-1])
     
-    # Create working array that we'll extend
+    # Calculate recent trend to guide forecasting
+    recent_window = min(14, len(historical_values))
+    recent_trend = fast_trend_calculation(historical_values, recent_window)
+    
+    # Calculate recent volatility for realistic bounds
+    recent_volatility = np.std(historical_values[-recent_window:]) if recent_window > 1 else 0
+    
+    # Working array for iterative updates
     working_values = historical_values.copy()
     
-    # Pre-calculate holiday dates for speed
-    holiday_dates = set()  # Simplified - add holiday logic if needed
+    # Calculate base patterns from historical data
+    base_patterns = {}
+    if len(historical_values) >= 7:
+        # Weekly patterns
+        for dow in range(7):
+            dow_values = []
+            for i in range(len(model_data)):
+                if pd.to_datetime(model_data['ds'].iloc[i]).dayofweek == dow:
+                    dow_values.append(historical_values[i])
+            if dow_values:
+                base_patterns[f'dow_{dow}'] = np.mean(dow_values)
     
     for i in range(forecast_periods):
         # Calculate next date
         next_date = last_date + pd.Timedelta(days=1)
         
-        # Fast temporal feature calculation
+        # Create feature dictionary
         next_features = {}
+        
+        # Temporal features
         next_features['year'] = next_date.year
         next_features['month'] = next_date.month
+        next_features['day'] = next_date.day
         next_features['dayofweek'] = next_date.dayofweek
         next_features['hour'] = next_date.hour
+        next_features['week_of_year'] = next_date.isocalendar().week
         next_features['quarter'] = next_date.quarter
+        next_features['day_of_year'] = next_date.dayofyear
         
-        # Fast cyclical features
+        # Cyclical features
         next_features['hour_sin'] = np.sin(2 * np.pi * next_features['hour'] / 24)
         next_features['hour_cos'] = np.cos(2 * np.pi * next_features['hour'] / 24)
         next_features['dow_sin'] = np.sin(2 * np.pi * next_features['dayofweek'] / 7)
         next_features['dow_cos'] = np.cos(2 * np.pi * next_features['dayofweek'] / 7)
         next_features['month_sin'] = np.sin(2 * np.pi * next_features['month'] / 12)
         next_features['month_cos'] = np.cos(2 * np.pi * next_features['month'] / 12)
+        next_features['quarter_sin'] = np.sin(2 * np.pi * next_features['quarter'] / 4)
+        next_features['quarter_cos'] = np.cos(2 * np.pi * next_features['quarter'] / 4)
         
-        # Fast lag features using numba-optimized functions
-        if len(working_values) >= 1:
-            next_features['y_lag1'] = working_values[-1]
-        if len(working_values) >= 7:
-            next_features['y_lag7'] = working_values[-7]
-        if len(working_values) >= 14:
-            next_features['y_lag14'] = working_values[-14]
+        # Lag features with proper indexing
+        for lag in range(1, 31):
+            if f'y_lag{lag}' in features:
+                if len(working_values) >= lag:
+                    next_features[f'y_lag{lag}'] = working_values[-lag]
+                else:
+                    next_features[f'y_lag{lag}'] = np.mean(working_values) if len(working_values) > 0 else 0
         
-        # Fast rolling statistics
-        mean_7, std_7, _, _, _ = fast_rolling_stats(working_values, 7)
-        mean_30, std_30, _, _, _ = fast_rolling_stats(working_values, 30)
-        next_features['y_rolling_mean_7'] = mean_7
-        next_features['y_rolling_std_7'] = std_7
-        next_features['y_rolling_mean_30'] = mean_30
-        next_features['y_rolling_std_30'] = std_30
+        # Rolling statistics
+        for window in [3, 7, 14, 21, 30, 60, 90]:
+            for stat in ['mean', 'std', 'max', 'min', 'median']:
+                feature_name = f'y_rolling_{stat}_{window}'
+                if feature_name in features:
+                    if stat == 'mean':
+                        mean_val, _, _, _, _ = fast_rolling_stats(working_values, window)
+                        next_features[feature_name] = mean_val
+                    elif stat == 'std':
+                        _, std_val, _, _, _ = fast_rolling_stats(working_values, window)
+                        next_features[feature_name] = std_val
+                    elif stat == 'max':
+                        _, _, max_val, _, _ = fast_rolling_stats(working_values, window)
+                        next_features[feature_name] = max_val
+                    elif stat == 'min':
+                        _, _, _, min_val, _ = fast_rolling_stats(working_values, window)
+                        next_features[feature_name] = min_val
+                    elif stat == 'median':
+                        _, _, _, _, median_val = fast_rolling_stats(working_values, window)
+                        next_features[feature_name] = median_val
         
-        # Fast EMA
-        next_features['y_ema_0.3'] = fast_ema(working_values, 0.3)
+        # EMA features
+        for alpha in [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]:
+            feature_name = f'y_ema_{alpha}'
+            if feature_name in features:
+                next_features[feature_name] = fast_ema(working_values, alpha)
         
-        # Fast percentage changes
-        next_features['y_pct_change_1d'] = fast_pct_change(working_values, 1)
-        next_features['y_pct_change_7d'] = fast_pct_change(working_values, 7)
+        # Percentage change features
+        for period in [1, 2, 3, 7, 14, 21, 30]:
+            feature_name = f'y_pct_change_{period}d'
+            if feature_name in features:
+                next_features[feature_name] = fast_pct_change(working_values, period)
         
-        # Fast pattern features
-        next_features['is_holiday'] = 0  # Simplified
+        # Volatility features
+        for window in [7, 14, 30]:
+            feature_name = f'y_volatility_{window}'
+            if feature_name in features:
+                next_features[feature_name] = fast_volatility(working_values, window)
+        
+        # Trend features
+        for window in [3, 7, 14, 21]:
+            feature_name = f'y_trend_{window}'
+            if feature_name in features:
+                next_features[feature_name] = fast_trend_calculation(working_values, window)
+        
+        # Pattern features
         next_features['is_weekend'] = 1 if next_features['dayofweek'] >= 5 else 0
+        next_features['is_monday'] = 1 if next_features['dayofweek'] == 0 else 0
         next_features['is_friday'] = 1 if next_features['dayofweek'] == 4 else 0
-        next_features['weekend_evening'] = next_features['is_weekend'] * (1 if next_features['hour'] >= 18 else 0)
-        next_features['friday_evening'] = next_features['is_friday'] * (1 if next_features['hour'] >= 17 else 0)
-        
-        # Seasonal features
         next_features['is_spring'] = 1 if next_features['month'] in [3, 4, 5] else 0
         next_features['is_summer'] = 1 if next_features['month'] in [6, 7, 8] else 0
         next_features['is_autumn'] = 1 if next_features['month'] in [9, 10, 11] else 0
         next_features['is_winter'] = 1 if next_features['month'] in [12, 1, 2] else 0
-        
-        # Trend feature
+        next_features['weekend_evening'] = next_features['is_weekend'] * (1 if next_features['hour'] >= 18 else 0)
+        next_features['friday_evening'] = next_features['is_friday'] * (1 if next_features['hour'] >= 17 else 0)
+        next_features['is_holiday'] = 0  # Simplified
         next_features['trend'] = len(working_values)
         
-        # Fill missing features with defaults
+        # Fill any missing features
         for feature in features:
             if feature not in next_features:
                 next_features[feature] = 0
@@ -345,14 +545,39 @@ def fast_iterative_forecast(xgb_model, scaler, features, model_data, forecast_pe
         
         # Scale and predict
         feature_vector_scaled = scaler.transform(feature_vector)
-        prediction = xgb_model.predict(feature_vector_scaled)[0]
-        prediction = max(0, prediction)  # Ensure non-negative
+        base_prediction = xgb_model.predict(feature_vector_scaled)[0]
+        
+        # Apply trend adjustment to maintain continuity
+        if i == 0:
+            # For first prediction, apply recent trend more strongly
+            trend_adjustment = recent_trend * 0.5
+        else:
+            # For subsequent predictions, use a mix of model trend and recent trend
+            model_trend = forecasts[i-1] - working_values[-1] if i == 1 else forecasts[i-1] - forecasts[i-2]
+            trend_adjustment = 0.7 * model_trend + 0.3 * recent_trend
+        
+        # Combine base prediction with trend adjustment
+        adjusted_prediction = base_prediction + trend_adjustment
+        
+        # Apply pattern-based adjustments using historical data
+        dow_pattern_key = f'dow_{next_features["dayofweek"]}'
+        if dow_pattern_key in base_patterns:
+            pattern_adjustment = 0.1 * (base_patterns[dow_pattern_key] - np.mean(historical_values))
+            adjusted_prediction += pattern_adjustment
+        
+        # Apply realistic bounds based on historical volatility
+        recent_mean = np.mean(working_values[-7:]) if len(working_values) >= 7 else np.mean(working_values)
+        lower_bound = recent_mean - 3 * recent_volatility
+        upper_bound = recent_mean + 3 * recent_volatility
+        
+        # Ensure non-negative and within reasonable bounds
+        final_prediction = max(0, min(upper_bound, max(lower_bound, adjusted_prediction)))
         
         # Update working data
-        working_values = np.append(working_values, prediction)
+        working_values = np.append(working_values, final_prediction)
         
         # Store results
-        forecasts[i] = prediction
+        forecasts[i] = final_prediction
         forecast_dates.append(next_date)
         last_date = next_date
     
@@ -360,8 +585,8 @@ def fast_iterative_forecast(xgb_model, scaler, features, model_data, forecast_pe
 
 # ------------- EVALUATION AND VISUALIZATION ---------------
 
-def fast_evaluate_model(xgb_model, scaler, features, model_data):
-    """Fast model evaluation"""
+def enhanced_evaluate_model(xgb_model, scaler, features, model_data):
+    """Enhanced model evaluation with feature importance"""
     test_size = min(14, len(model_data) // 4)
     test_size = max(3, test_size)
     
@@ -372,279 +597,246 @@ def fast_evaluate_model(xgb_model, scaler, features, model_data):
     y_true = test_data['y'].values
     y_pred = xgb_model.predict(X_test_scaled)
     
-    # Fast metric calculation
+    # Calculate metrics
     mae = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
     mape = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1))) * 100
     
-    metrics = {'MAE': mae, 'RMSE': rmse, 'MAPE': mape}
-    return metrics, y_true, y_pred, test_data['ds'].values
-
-def create_fast_plot(historical_dates, historical_values, test_pred_dates, test_pred_values, forecast_dates, forecast_values, metric_name):
-    """Optimized plotting"""
-    fig = go.Figure()
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': features,
+        'importance': xgb_model.feature_importances_
+    }).sort_values('importance', ascending=False)
     
-    # Plot full historical actuals
+    metrics = {'MAE': mae, 'RMSE': rmse, 'MAPE': mape}
+    return metrics, y_true, y_pred, test_data['ds'].values, feature_importance
+
+def create_enhanced_plot(historical_dates, historical_values, test_pred_dates, test_pred_values, 
+                        forecast_dates, forecast_values, metric_name):
+    """Enhanced plotting with trend analysis"""
+    fig = make_subplots(
+        rows=2, cols=1, 
+        subplot_titles=(f'{metric_name} - Forecast Results', 'Recent Trend Analysis'),
+        vertical_spacing=0.12,
+        row_heights=[0.7, 0.3]
+    )
+    
+    # Main forecast plot
     fig.add_trace(go.Scatter(
         x=historical_dates, y=historical_values,
-        mode='lines', name='Actual',
+        mode='lines', name='Historical Data',
         line=dict(color='blue', width=2)
-    ))
+    ), row=1, col=1)
     
-    # Plot predictions on the test set
-    if len(test_pred_values) > 0:
+    # Test predictions
+    if len(test_pred_dates) > 0:
         fig.add_trace(go.Scatter(
             x=test_pred_dates, y=test_pred_values,
-            mode='lines', name='Predicted (Test Set)',
-            line=dict(color='red', width=2, dash='dash')
-        ))
-    
-    # Plot forecast
-    if len(forecast_values) > 0:
-        fig.add_trace(go.Scatter(
-            x=forecast_dates, y=forecast_values,
-            mode='lines+markers', name='Forecast',
-            line=dict(color='green', width=2),
+            mode='lines+markers', name='Test Predictions',
+            line=dict(color='orange', width=2, dash='dash'),
             marker=dict(size=6)
-        ))
+        ), row=1, col=1)
     
+    # Forecast
+    fig.add_trace(go.Scatter(
+        x=forecast_dates, y=forecast_values,
+        mode='lines+markers', name='Forecast',
+        line=dict(color='red', width=3),
+        marker=dict(size=8, symbol='diamond')
+    ), row=1, col=1)
+    
+    # Recent trend analysis (last 30 days)
+    recent_days = min(30, len(historical_values))
+    recent_dates = historical_dates[-recent_days:]
+    recent_values = historical_values[-recent_days:]
+    
+    fig.add_trace(go.Scatter(
+        x=recent_dates, y=recent_values,
+        mode='lines+markers', name='Recent Trend',
+        line=dict(color='green', width=2),
+        marker=dict(size=4)
+    ), row=2, col=1)
+    
+    # Add trend line
+    if len(recent_values) >= 2:
+        x_numeric = np.arange(len(recent_values))
+        trend_coef = np.polyfit(x_numeric, recent_values, 1)
+        trend_line = np.poly1d(trend_coef)(x_numeric)
+        
+        fig.add_trace(go.Scatter(
+            x=recent_dates, y=trend_line,
+            mode='lines', name='Trend Line',
+            line=dict(color='purple', width=2, dash='dot')
+        ), row=2, col=1)
+    
+    # Layout
     fig.update_layout(
-        title=f'{metric_name} - Fast Forecast Results',
-        xaxis_title='Date', yaxis_title='Value',
-        hovermode='x unified', height=400
+        height=700,
+        title_text=f"Enhanced {metric_name} Forecast Analysis",
+        showlegend=True,
+        hovermode='x unified'
     )
+    
+    fig.update_xaxes(title_text="Date", row=2, col=1)
+    fig.update_yaxes(title_text=metric_name, row=1, col=1)
+    fig.update_yaxes(title_text="Recent Values", row=2, col=1)
     
     return fig
 
-# ------------- MAIN STREAMLIT APP ---------------
+# ------------- STREAMLIT APPLICATION ---------------
 
-st.set_page_config(layout="wide", page_title="⚡ Fast XGBoost ED Forecasting")
-st.title("⚡ High-Speed XGBoost Emergency Department Forecasting")
-st.markdown("*Optimized for speed with proper iterative forecasting*")
-
-# Performance settings in sidebar
-st.sidebar.header("⚙️ Performance Settings")
-use_parallel = st.sidebar.checkbox("Parallel Processing", value=True, help="Use multiple CPU cores")
-max_workers = st.sidebar.slider("Max Workers", 1, mp.cpu_count(), mp.cpu_count()//2)
-
-st.sidebar.header("📁 Upload & Settings")
-uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=['xlsx', 'xls'])
-
-if uploaded_file:
-    # Load and preprocess data
-    with st.spinner("Loading data..."):
-        df_raw = pd.read_excel(uploaded_file)
-        
-        if df_raw.shape[1] > 1:
-            df_raw = df_raw.iloc[:, 1:]
-        
-        if 'Date' not in df_raw.columns or 'Hospital' not in df_raw.columns:
-            st.sidebar.error("Excel must include 'Date' and 'Hospital' columns.")
-            st.stop()
-        
-        df_raw['Date'] = pd.to_datetime(df_raw['Date'])
+def main():
+    st.set_page_config(page_title="Enhanced Time Series Forecaster", layout="wide")
     
-    # Configuration
-    target_metrics_info = [
-        ('Tracker8am', '08:00:00'),
-        ('Tracker2pm', '14:00:00'),
-        ('Tracker8pm', '20:00:00'),
-        ('AdditionalCapacityOpenMorning', '08:00:00'),
-        ('TimeTotal_8am', '08:00:00'),
-        ('TimeTotal_2pm', '14:00:00'),
-        ('TimeTotal_8pm', '20:00:00'),
-    ]
-    target_cols = [m[0] for m in target_metrics_info if m[0] in df_raw.columns]
+    st.title("🚀 Enhanced Time Series Forecaster")
+    st.markdown("Advanced XGBoost forecasting with correlation analysis and feature selection")
     
-    hospitals = ['All Hospitals'] + sorted(df_raw['Hospital'].unique())
-    selected_hospital = st.sidebar.selectbox("Select Hospital", hospitals)
+    # File upload
+    uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
     
-    forecast_days = st.sidebar.slider("Forecast Days", min_value=7, max_value=30, value=14)
-    
-    # Model selection
-    selected_metrics = st.sidebar.multiselect(
-        "Select Metrics to Forecast", 
-        [m[0] for m in target_metrics_info if m[0] in df_raw.columns],
-        default=[m[0] for m in target_metrics_info if m[0] in df_raw.columns][:3]  # Default to first 3
-    )
-    
-    if st.sidebar.button("⚡ Run Fast Forecast", type="primary"):
-        start_time = time.time()
-        
-        # Get holidays
-        years = list(df_raw['Date'].dt.year.unique())
-        ir_holidays = get_ireland_holidays(years)
-        
-        # Filter data
-        if selected_hospital == "All Hospitals":
-            df_filtered = df_raw.groupby('Date')[target_cols].sum().reset_index()
-        else:
-            df_filtered = df_raw[df_raw['Hospital'] == selected_hospital].copy()
-        
-        st.header(f"⚡ Fast Forecast Results for {selected_hospital}")
-        
-        # Progress tracking
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        results_summary = []
-        total_metrics = len(selected_metrics)
-        
-        # Parallel processing option
-        if use_parallel and total_metrics > 1:
-            st.info(f"🚀 Using parallel processing with {max_workers} workers")
+    if uploaded_file is not None:
+        try:
+            # Load data
+            df = pd.read_csv(uploaded_file)
+            st.success(f"Data loaded: {len(df)} rows, {len(df.columns)} columns")
             
-            # Prepare arguments for parallel processing
-            args_list = [(df_filtered, metric_name, ir_holidays) for metric_name in selected_metrics]
+            # Display data info
+            with st.expander("Data Preview"):
+                st.dataframe(df.head())
+                st.write("**Columns:**", list(df.columns))
             
-            # Process features in parallel
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                feature_results = list(executor.map(parallel_feature_creation, args_list))
+            # Column selection
+            col1, col2 = st.columns(2)
             
-            # Process each metric
-            for idx, (metric_name, feature_df) in enumerate(feature_results):
-                if feature_df is None:
-                    st.error(f"Failed to process {metric_name}")
-                    continue
+            with col1:
+                date_col = st.selectbox("Select Date Column", df.columns)
                 
-                progress_bar.progress((idx + 1) / total_metrics)
-                status_text.text(f"Processing {metric_name} ({idx + 1}/{total_metrics})")
+            with col2:
+                metric_col = st.selectbox("Select Metric Column", 
+                                        [col for col in df.columns if col != date_col])
+            
+            # Parameters
+            with st.sidebar:
+                st.header("Forecasting Parameters")
+                forecast_days = st.slider("Forecast Days", 1, 30, 14)
+                correlation_threshold = st.slider("Correlation Threshold", 0.05, 0.3, 0.1, 0.01)
                 
-                with st.expander(f"📊 {metric_name}", expanded=idx < 2):  # Show first 2 expanded
-                    try:
-                        if len(feature_df) < 50:
-                            st.warning(f"Insufficient data for {metric_name}. Need at least 50 rows, got {len(feature_df)}. Skipping.")
-                            continue
-                        
-                        # Train model
-                        model_start = time.time()
-                        xgb_model, scaler, features, model_data = train_optimized_xgboost(feature_df, metric_name)
-                        model_time = time.time() - model_start
-                        
-                        # Evaluate
-                        metrics, y_true, y_pred, test_dates = fast_evaluate_model(xgb_model, scaler, features, model_data)
-                        
-                        # Forecast
-                        forecast_start = time.time()
-                        forecasts, forecast_dates = fast_iterative_forecast(
-                            xgb_model, scaler, features, model_data, forecast_days
-                        )
-                        forecast_time = time.time() - forecast_start
-                        
-                        # Display results
-                        col1, col2, col3, col4, col5 = st.columns(5)
-                        with col1:
-                            st.metric("MAE", f"{metrics['MAE']:.2f}")
-                        with col2:
-                            st.metric("RMSE", f"{metrics['RMSE']:.2f}")
-                        with col3:
-                            st.metric("MAPE", f"{metrics['MAPE']:.1f}%")
-                        with col4:
-                            st.metric("Features", len(features))
-                        with col5:
-                            st.metric("Speed", f"{model_time + forecast_time:.1f}s")
-                        
-                        # Plot
-                        fig = create_fast_plot(model_data['ds'], model_data['y'], test_dates, y_pred, forecast_dates, forecasts, metric_name)
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Forecast table (compact)
-                        if len(forecasts) > 0:
-                            forecast_df = pd.DataFrame({
-                                'Date': forecast_dates,
-                                'Forecast': [f"{f:.1f}" for f in forecasts]
-                            })
-                            st.dataframe(forecast_df.head(7), use_container_width=True)  # Show first week
-                        
-                        results_summary.append({
-                            'Metric': metric_name,
-                            'MAE': metrics['MAE'],
-                            'RMSE': metrics['RMSE'],
-                            'MAPE': metrics['MAPE'],
-                            'Features': len(features),
-                            'Time_s': model_time + forecast_time
+                st.header("Model Parameters")
+                show_correlations = st.checkbox("Show Feature Correlations", True)
+                show_importance = st.checkbox("Show Feature Importance", True)
+            
+            if st.button("🔮 Generate Forecast", type="primary"):
+                with st.spinner("Processing... This may take a moment"):
+                    
+                    # Prepare data
+                    df_clean = df[[date_col, metric_col]].copy()
+                    df_clean.columns = ['Date', metric_col]
+                    df_clean['Date'] = pd.to_datetime(df_clean['Date'])
+                    df_clean = df_clean.dropna().sort_values('Date')
+                    
+                    if len(df_clean) < 30:
+                        st.error("Need at least 30 data points for forecasting")
+                        return
+                    
+                    # Get holidays
+                    years = list(range(df_clean['Date'].dt.year.min(), 
+                                     df_clean['Date'].dt.year.max() + 2))
+                    ir_holidays = get_ireland_holidays(years)
+                    
+                    # Create features
+                    feature_df = create_comprehensive_features(df_clean, metric_col, ir_holidays)
+                    
+                    # Train model
+                    xgb_model, scaler, selected_features, model_data, correlation_info = train_enhanced_xgboost(
+                        feature_df, metric_col, correlation_threshold
+                    )
+                    
+                    # Evaluate model
+                    metrics, y_true, y_pred, test_dates, feature_importance = enhanced_evaluate_model(
+                        xgb_model, scaler, selected_features, model_data
+                    )
+                    
+                    # Generate forecast
+                    forecast_values, forecast_dates = trend_aware_iterative_forecast(
+                        xgb_model, scaler, selected_features, model_data, forecast_days
+                    )
+                    
+                    # Display results
+                    st.success("✅ Forecast completed!")
+                    
+                    # Metrics
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("MAE", f"{metrics['MAE']:.3f}")
+                    with col2:
+                        st.metric("RMSE", f"{metrics['RMSE']:.3f}")
+                    with col3:
+                        st.metric("MAPE", f"{metrics['MAPE']:.1f}%")
+                    
+                    # Plot
+                    historical_dates = pd.to_datetime(model_data['ds']).tolist()
+                    historical_values = model_data['y'].tolist()
+                    
+                    fig = create_enhanced_plot(
+                        historical_dates, historical_values,
+                        pd.to_datetime(test_dates).tolist(), y_pred.tolist(),
+                        forecast_dates, forecast_values,
+                        metric_col
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Additional analysis
+                    if show_correlations and len(correlation_info) > 0:
+                        with st.expander("🔗 Feature Correlations"):
+                            st.dataframe(correlation_info.head(20))
+                    
+                    if show_importance and len(feature_importance) > 0:
+                        with st.expander("⭐ Feature Importance"):
+                            st.dataframe(feature_importance.head(15))
+                    
+                    # Forecast table
+                    with st.expander("📊 Forecast Details"):
+                        forecast_df = pd.DataFrame({
+                            'Date': forecast_dates,
+                            'Forecast': forecast_values
                         })
+                        st.dataframe(forecast_df)
                         
-                    except Exception as e:
-                        st.error(f"Error processing {metric_name}: {str(e)}")
-        
-        else:
-            # Sequential processing
-            for idx, metric_name in enumerate(selected_metrics):
-                progress_bar.progress((idx + 1) / total_metrics)
-                status_text.text(f"Processing {metric_name} ({idx + 1}/{total_metrics})")
-                
-                if metric_name not in df_filtered.columns:
-                    st.warning(f"Metric '{metric_name}' not found in the data. Skipping.")
-                    continue
-                
-                with st.expander(f"📊 {metric_name}", expanded=idx < 2):
-                    try:
-                        # Create features
-                        feature_df = create_optimized_features(df_filtered, metric_name, ir_holidays)
-                        
-                        if len(feature_df) < 50:
-                            st.warning(f"Insufficient data for {metric_name}. Need at least 50 rows, got {len(feature_df)}. Skipping.")
-                            continue
-                        
-                        # Train model
-                        model_start = time.time()
-                        xgb_model, scaler, features, model_data = train_optimized_xgboost(feature_df, metric_name)
-                        model_time = time.time() - model_start
-                        
-                        # Evaluate
-                        metrics, y_true, y_pred, test_dates = fast_evaluate_model(xgb_model, scaler, features, model_data)
-                        
-                        # Forecast
-                        forecast_start = time.time()
-                        forecasts, forecast_dates = fast_iterative_forecast(
-                            xgb_model, scaler, features, model_data, forecast_days
+                        # Download button
+                        csv = forecast_df.to_csv(index=False)
+                        st.download_button(
+                            "Download Forecast CSV",
+                            csv,
+                            "forecast.csv",
+                            "text/csv"
                         )
-                        forecast_time = time.time() - forecast_start
-                        
-                        # Display results
-                        col1, col2, col3, col4, col5 = st.columns(5)
-                        with col1:
-                            st.metric("MAE", f"{metrics['MAE']:.2f}")
-                        with col2:
-                            st.metric("RMSE", f"{metrics['RMSE']:.2f}")
-                        with col3:
-                            st.metric("MAPE", f"{metrics['MAPE']:.1f}%")
-                        with col4:
-                            st.metric("Features", len(features))
-                        with col5:
-                            st.metric("Speed", f"{model_time + forecast_time:.1f}s")
-                        
-                        # Plot
-                        fig = create_fast_plot(model_data['ds'], model_data['y'], test_dates, y_pred, forecast_dates, forecasts, metric_name)
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Forecast table
-                        if len(forecasts) > 0:
-                            forecast_df = pd.DataFrame({
-                                'Date': forecast_dates,
-                                'Forecast': [f"{f:.1f}" for f in forecasts]
-                            })
-                            st.dataframe(forecast_df.head(7), use_container_width=True)
-                        
-                        results_summary.append({
-                            'Metric': metric_name,
-                            'MAE': metrics['MAE'],
-                            'RMSE': metrics['RMSE'],
-                            'MAPE': metrics['MAPE'],
-                            'Features': len(features),
-                            'Time_s': model_time + forecast_time
-                        })
-                        
-                    except Exception as e:
-                        st.error(f"Error processing {metric_name}: {str(e)}")
+                    
+                    st.info(f"✨ Used {len(selected_features)} selected features out of {len(feature_df.columns)-2} total features")
+                    
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            st.exception(e)
+    
+    else:
+        st.info("👆 Upload a CSV file to get started")
         
-        # Final Summary
-        if results_summary:
-            st.subheader("📊 Overall Forecast Summary")
-            summary_df = pd.DataFrame(results_summary)
-            st.dataframe(summary_df.set_index('Metric'), use_container_width=True)
-            st.success(f"✅ Forecasting completed in {time.time() - start_time:.2f} seconds!")
-        else:
-            st.warning("No metrics were successfully processed for forecasting.")
+        # Example data format
+        with st.expander("📋 Expected Data Format"):
+            st.write("""
+            Your CSV should have:
+            - A date column (any standard date format)
+            - A numeric metric column to forecast
+            
+            Example:
+            ```
+            Date, Sales
+            2023-01-01, 100
+            2023-01-02, 120
+            2023-01-03, 95
+            ...
+            ```
+            """)
 
+if __name__ == "__main__":
+    main()
