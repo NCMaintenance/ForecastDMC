@@ -263,7 +263,7 @@ for hosp in h_list:
 
         # Create features on historical data (df2_renamed_target which has 'ds' and 'y')
         # Pass available_targets_for_hospital to know which other metrics can be used for features
-        df_feat_hist = create_advanced_features(df2_renamed_target.copy(), 'y', available_targets_for_hospital, max_lags=7)
+        df_feat_hist = create_advanced_features(df2_renamed_target.copy(), 'y', available_targets_for_hospital, max_lags=14)
 
         # Drop rows with too many NaNs after feature creation (mostly at the beginning due to lags/rolling windows)
         df_feat_hist = df_feat_hist.dropna(thresh=int(len(df_feat_hist.columns) * 0.7)) # Keep rows with at least 70% non-NaNs
@@ -402,7 +402,7 @@ for hosp in h_list:
         last_known_date_overall = df_feat_hist['ds'].iloc[-1] # Last date from historical features
 
         # Constants for feature generation (mirroring create_advanced_features)
-        MAX_LAGS = 7
+        MAX_LAGS = 14 # Updated to match historical feature generation
         ROLLING_WINDOWS = [3, 7, 14, 21]
         EWM_ALPHAS = [0.1, 0.3, 0.5]
         DIFF_LAGS = [1, 2, 3, 7] # From create_advanced_features
