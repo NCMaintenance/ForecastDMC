@@ -40,7 +40,8 @@ sel_hosp = st.sidebar.selectbox("🏨 Hospital", ["All"] + hospitals)
 sel_target = st.sidebar.selectbox("🎯 Target", ["All"] + targets)
 future_days = st.sidebar.slider("⏳ Forecast horizon (days ahead)", 7, 30, 14)
 correlation_threshold = st.sidebar.slider("📊 Correlation threshold for feature selection", 0.0, 0.5, 0.1)
-max_forecast_horizon = st.sidebar.slider("🔍 Max forecast horizon to test (days)", 1, 7, 7) # Not directly used in the future forecast loop being refactored
+max_forecast_horizon_eval = st.sidebar.slider("📊 Horizons for Performance Evaluation (days)", 1, 7, 7, help="Evaluate model MAE at different forecast lead times. This is separate from the main 'Forecast horizon (days ahead)' used for final predictions.")
+run_horizon_evaluation = st.sidebar.checkbox("🔬 Run Performance Horizon Evaluation", value=True, help="If checked, evaluates model MAE at different short-term forecast lead times. Uncheck to speed up if this evaluation is not needed.")
 run = st.sidebar.button("▶️ Run Forecast")
 
 if not run:
@@ -285,8 +286,24 @@ for hosp in h_list:
             threshold=correlation_threshold
         )
 
+        if feature_correlations:
+            st.subheader(f"Top 20 Correlated Features for {tgt} (Absolute Correlation with Target)")
+            sorted_correlations = sorted(feature_correlations.items(), key=lambda item: item[1], reverse=True)
+            top_20_features = sorted_correlations[:20]
+
+            if top_20_features:
+                df_top_corr_features = pd.DataFrame(top_20_features, columns=['Feature', 'Absolute Correlation'])
+                # Format correlation to 4 decimal places for better readability
+                st.dataframe(df_top_corr_features.style.format({'Absolute Correlation': "{:.4f}"}))
+            else:
+                # This case might occur if feature_correlations is not empty but all values were below the threshold
+                # or if feature_correlations was empty to begin with (covered by outer else)
+                st.info(f"No features met the correlation threshold for {tgt} to display in top 20.")
+        else:
+            st.info(f"No feature correlations were computed for {tgt} (e.g., due to insufficient data or all features failing criteria).")
+
         if not selected_features:
-            st.warning(f"⚠️ No features selected for {tgt} based on correlation threshold. Skipping.")
+            st.warning(f"⚠️ No features selected for {tgt} based on correlation threshold (and multicollinearity check). Skipping model training.")
             continue
 
         X_train = train_df[selected_features]
@@ -298,6 +315,29 @@ for hosp in h_list:
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train.fillna(0)) # Fill NaNs before scaling
         X_test_scaled = scaler.transform(X_test.fillna(0))     # Fill NaNs before scaling
+
+        # Evaluate performance across different horizons
+        if run_horizon_evaluation:
+            if len(X_train) > 30 and len(y_train) > 30 and max_forecast_horizon_eval > 0:
+                st.write("Evaluating performance for different short-term forecast horizons...")
+                # Pass X_train (selected features, unscaled), y_train.
+                # X_test, y_test are part of the function signature but not directly used in its CV loop.
+                horizon_results = evaluate_forecast_horizons(X_train, y_train, X_test, y_test, max_horizon=max_forecast_horizon_eval)
+                if horizon_results:
+                    st.subheader("Performance across different short-term forecast horizons (Lower MAE is better):")
+                    # Filter out NaN results before creating DataFrame
+                    filtered_horizon_results = {h:mae for h, mae in horizon_results.items() if pd.notna(mae)}
+                    if filtered_horizon_results:
+                        horizon_df = pd.DataFrame.from_dict(filtered_horizon_results, orient='index', columns=['Mean CV MAE'])
+                        horizon_df.index.name = 'Forecast Horizon (Days)'
+                        st.dataframe(horizon_df.sort_index())
+                    else:
+                        st.info("Could not evaluate performance across different horizons (e.g., results were NaN for all horizons).")
+                else:
+                    st.info("Could not evaluate performance across different horizons (e.g., due to insufficient data for any horizon).")
+            elif max_forecast_horizon_eval <= 0 : # If main checkbox is true, but slider is 0
+                 st.info("Performance Horizon Evaluation was enabled, but 'Horizons for Performance Evaluation (days)' is 0. Set to > 0 to run.")
+            # Implicitly, if data is insufficient, the inner 'if' handles it or the function itself warns.
 
         # Train LightGBM model
         lgb_model = LGBMRegressor(n_estimators=150, learning_rate=0.05, num_leaves=20, max_depth=7, min_child_samples=15, random_state=42, n_jobs=-1)
