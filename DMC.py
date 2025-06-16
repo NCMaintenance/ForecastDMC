@@ -126,17 +126,26 @@ def forecast_with_lags(model, historical_data, future_df, features):
     predictions = []
     current_lags = list(reversed(last_values))  # [lag_1, lag_2, lag_3]
     
+    # Features without lag columns
+    base_features = [f for f in features if not f.startswith('Lag_')]
+    
     for idx, row in future_df.iterrows():
         # Create feature vector with current lags
-        feature_vector = row[features[:-3]].values.tolist() + current_lags
-        feature_vector = np.array(feature_vector).reshape(1, -1)
-        
-        # Make prediction
-        pred = model.predict(feature_vector)[0]
-        predictions.append(pred)
-        
-        # Update lags for next prediction
-        current_lags = [pred] + current_lags[:2]
+        try:
+            base_values = [row[f] for f in base_features]
+            feature_vector = base_values + current_lags
+            feature_vector = np.array(feature_vector).reshape(1, -1)
+            
+            # Make prediction
+            pred = model.predict(feature_vector)[0]
+            predictions.append(max(0, pred))  # Ensure non-negative predictions
+            
+            # Update lags for next prediction
+            current_lags = [pred] + current_lags[:2]
+            
+        except Exception as e:
+            st.error(f"Error in prediction: {e}")
+            predictions.append(0)
     
     return predictions
 
