@@ -9,3 +9,4 @@ plotly
 optuna
 seaborn
 statsmodels
+nixtla
