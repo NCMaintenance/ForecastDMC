@@ -1,842 +1,577 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-import holidays
+from prophet import Prophet
+# from prophet.diagnostics import cross_validation, performance_metrics # Not used in current forecasting loop
+from lightgbm import LGBMRegressor
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.feature_selection import SelectKBest, f_regression
-from scipy.stats import pearsonr
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import plotly.graph_objs as go
 import warnings
-from numba import jit, prange
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-import multiprocessing as mp
-from functools import partial
-import time
-warnings.filterwarnings('ignore')
+from scipy import stats # Not used directly in loop, but pearsonr is
+from scipy.stats import pearsonr
 
-# ------------- SPEED OPTIMIZATIONS ---------------
+warnings.filterwarnings("ignore")
 
-@jit(nopython=True)
-def fast_rolling_stats(values, window):
-    """Fast rolling statistics using Numba"""
-    n = len(values)
-    if n == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
-    
-    start_idx = max(0, n - window)
-    window_data = values[start_idx:n]
-    
-    if len(window_data) == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
-    
-    mean_val = np.mean(window_data)
-    std_val = np.std(window_data) if len(window_data) > 1 else 0.0
-    max_val = np.max(window_data)
-    min_val = np.min(window_data)
-    median_val = np.median(window_data)
-    
-    return mean_val, std_val, max_val, min_val, median_val
+st.set_page_config(layout="wide")
+st.title("🏥 Enhanced Hospital Forecasting with Advanced Feature Engineering 📈")
 
-@jit(nopython=True)
-def fast_ema(values, alpha):
-    """Fast exponential moving average"""
-    if len(values) == 0:
-        return 0.0
-    
-    ema = values[0]
-    for i in range(1, len(values)):
-        ema = alpha * values[i] + (1 - alpha) * ema
-    return ema
+# Sidebar
+uploaded = st.sidebar.file_uploader("📂 Upload Excel file", type="xlsx")
+hospitals = []
+targets = [
+    "Tracker8am", "Tracker2pm", "Tracker8pm",
+    "AdditionalCapacityOpen Morning",
+    "TimeTotal_8am", "TimeTotal_2pm", "TimeTotal_8pm"
+]
 
-@jit(nopython=True)
-def fast_pct_change(values, periods):
-    """Fast percentage change calculation"""
-    n = len(values)
-    if n <= periods or values[n-periods-1] == 0:
-        return 0.0
-    return (values[n-1] - values[n-periods-1]) / values[n-periods-1]
+if not uploaded:
+    st.sidebar.info("ℹ️ Please upload your Excel file.")
+    st.stop()
 
-@jit(nopython=True)
-def fast_volatility(values, window):
-    """Fast volatility calculation"""
-    n = len(values)
-    if n < window:
-        window_data = values
-    else:
-        window_data = values[n-window:n]
-    
-    if len(window_data) <= 1:
-        return 0.0
-    
-    mean_val = np.mean(window_data)
-    if mean_val == 0:
-        return 0.0
-    
-    std_val = np.std(window_data)
-    return std_val / mean_val
+# Load data
+df = pd.read_excel(uploaded)
+df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y')
+df = df.sort_values('Date')
+hospitals = sorted(df['Hospital'].unique())
 
-@jit(nopython=True)
-def fast_trend_calculation(values, window=7):
-    """Calculate trend slope over a window"""
-    n = len(values)
-    if n < window:
-        window_data = values
-        x_data = np.arange(len(window_data))
-    else:
-        window_data = values[n-window:n]
-        x_data = np.arange(window)
-    
-    if len(window_data) < 2:
-        return 0.0
-    
-    # Simple linear regression slope
-    n_points = len(window_data)
-    sum_x = np.sum(x_data)
-    sum_y = np.sum(window_data)
-    sum_xy = np.sum(x_data * window_data)
-    sum_x2 = np.sum(x_data * x_data)
-    
-    denominator = n_points * sum_x2 - sum_x * sum_x
-    if denominator == 0:
-        return 0.0
-    
-    slope = (n_points * sum_xy - sum_x * sum_y) / denominator
-    return slope
+sel_hosp = st.sidebar.selectbox("🏨 Hospital", ["All"] + hospitals)
+sel_target = st.sidebar.selectbox("🎯 Target", ["All"] + targets)
+future_days = st.sidebar.slider("⏳ Forecast horizon (days ahead)", 7, 30, 14)
+correlation_threshold = st.sidebar.slider("📊 Correlation threshold for feature selection", 0.0, 0.5, 0.1)
+max_forecast_horizon = st.sidebar.slider("🔍 Max forecast horizon to test (days)", 1, 7, 7) # Not directly used in the future forecast loop being refactored
+run = st.sidebar.button("▶️ Run Forecast")
 
-# ------------- CORRELATION ANALYSIS AND FEATURE SELECTION ---------------
+if not run:
+    st.sidebar.info("⚙️ Configure then click Run Forecast")
+    st.stop()
 
-def analyze_feature_correlations(feature_df, target_col='y', correlation_threshold=0.1):
-    """Analyze correlations and select best features"""
-    
-    # Calculate all features first
-    all_features = []
-    
-    # Basic temporal features
-    temporal_features = [
-        'year', 'month', 'day', 'dayofweek', 'hour', 'week_of_year', 
-        'quarter', 'day_of_year', 'hour_sin', 'hour_cos', 'dow_sin', 
-        'dow_cos', 'month_sin', 'month_cos', 'quarter_sin', 'quarter_cos'
-    ]
-    all_features.extend(temporal_features)
-    
-    # Pattern features
-    pattern_features = [
-        'is_weekend', 'is_monday', 'is_friday', 'is_spring', 'is_summer', 
-        'is_autumn', 'is_winter', 'weekend_evening', 'friday_evening'
-    ]
-    all_features.extend(pattern_features)
-    
-    # All possible lag features (1-30 days)
-    lag_features = [f'y_lag{i}' for i in range(1, 31)]
-    all_features.extend(lag_features)
-    
-    # All possible rolling features
-    rolling_windows = [3, 7, 14, 21, 30, 60, 90]
-    rolling_stats = ['mean', 'std', 'max', 'min', 'median']
-    for window in rolling_windows:
-        for stat in rolling_stats:
-            all_features.append(f'y_rolling_{stat}_{window}')
-    
-    # EMA features
-    ema_alphas = [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
-    for alpha in ema_alphas:
-        all_features.append(f'y_ema_{alpha}')
-    
-    # Percentage change features
-    pct_periods = [1, 2, 3, 7, 14, 21, 30]
-    for period in pct_periods:
-        all_features.append(f'y_pct_change_{period}d')
-    
-    # Volatility features
-    vol_windows = [7, 14, 30]
-    for window in vol_windows:
-        all_features.append(f'y_volatility_{window}')
-    
-    # Trend features
-    trend_windows = [3, 7, 14, 21]
-    for window in trend_windows:
-        all_features.append(f'y_trend_{window}')
-    
-    # Other features
-    other_features = ['is_holiday', 'trend']
-    all_features.extend(other_features)
-    
-    # Check which features exist in the dataframe
-    available_features = [f for f in all_features if f in feature_df.columns]
-    
-    # Calculate correlations
-    correlations = {}
-    target_values = feature_df[target_col].dropna()
-    
-    for feature in available_features:
-        if feature in feature_df.columns:
-            feature_values = feature_df[feature]
-            
-            # Align the data (remove NaN pairs)
-            aligned_data = pd.DataFrame({
-                'target': target_values,
-                'feature': feature_values
-            }).dropna()
-            
-            if len(aligned_data) > 10:  # Need sufficient data points
-                try:
-                    corr, p_value = pearsonr(aligned_data['target'], aligned_data['feature'])
-                    correlations[feature] = {
-                        'correlation': abs(corr),
-                        'p_value': p_value,
-                        'raw_correlation': corr
-                    }
-                except:
-                    correlations[feature] = {
-                        'correlation': 0.0,
-                        'p_value': 1.0,
-                        'raw_correlation': 0.0
-                    }
-    
-    # Sort by correlation strength
-    sorted_features = sorted(correlations.items(), 
-                           key=lambda x: x[1]['correlation'], 
-                           reverse=True)
-    
-    # Select features above threshold
-    selected_features = []
-    correlation_info = []
-    
-    for feature, corr_info in sorted_features:
-        if corr_info['correlation'] >= correlation_threshold and corr_info['p_value'] < 0.05:
-            selected_features.append(feature)
-            correlation_info.append({
-                'feature': feature,
-                'correlation': corr_info['raw_correlation'],
-                'abs_correlation': corr_info['correlation'],
-                'p_value': corr_info['p_value']
-            })
-    
-    # Ensure we have at least some essential features
-    essential_features = ['y_lag1', 'y_lag7', 'dayofweek', 'hour', 'month']
-    for feature in essential_features:
-        if feature in available_features and feature not in selected_features:
-            selected_features.append(feature)
-            if feature in correlations:
-                correlation_info.append({
-                    'feature': feature,
-                    'correlation': correlations[feature]['raw_correlation'],
-                    'abs_correlation': correlations[feature]['correlation'],
-                    'p_value': correlations[feature]['p_value']
-                })
-    
-    return selected_features[:50], pd.DataFrame(correlation_info)  # Limit to top 50 features
+def create_advanced_features(df_input, target_col, all_hospital_cols, max_lags=7):
+    df_feat = df_input.copy()
+    # Ensure 'ds' column exists for temporal features
+    if 'ds' not in df_feat.columns:
+        raise ValueError("Input DataFrame must contain a 'ds' column with datetime objects.")
 
-@st.cache_data
-def get_ireland_holidays(years):
-    """Cached holiday calculation"""
-    ir_holidays = holidays.Ireland(years=years)
-    for year in years:
-        ir_holidays[f'{year}-02-15'] = "Custom Feb Bank Holiday"
-    return ir_holidays
+    predictor_cols = [col for col in all_hospital_cols if col != target_col and col in df_feat.columns]
+    # Use a common name for the target column in feature names, e.g., 'target'
+    # but keep original target_col for accessing its data in df_feat
 
-def create_temporal_features(dates):
-    """Vectorized temporal feature creation"""
-    df = pd.DataFrame(index=dates)
-    
-    # Basic temporal features
-    df['year'] = dates.year
-    df['month'] = dates.month
-    df['day'] = dates.day
-    df['dayofweek'] = dates.dayofweek
-    df['hour'] = dates.hour
-    df['week_of_year'] = dates.isocalendar().week
-    df['quarter'] = dates.quarter
-    df['day_of_year'] = dates.dayofyear
-    
-    # Cyclical encoding
-    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-    df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
-    df['dow_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
-    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-    df['quarter_sin'] = np.sin(2 * np.pi * df['quarter'] / 4)
-    df['quarter_cos'] = np.cos(2 * np.pi * df['quarter'] / 4)
-    
-    # Pattern features
-    df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
-    df['is_monday'] = (df['dayofweek'] == 0).astype(int)
-    df['is_friday'] = (df['dayofweek'] == 4).astype(int)
-    
-    # Seasonal patterns
-    df['is_spring'] = df['month'].isin([3, 4, 5]).astype(int)
-    df['is_summer'] = df['month'].isin([6, 7, 8]).astype(int)
-    df['is_autumn'] = df['month'].isin([9, 10, 11]).astype(int)
-    df['is_winter'] = df['month'].isin([12, 1, 2]).astype(int)
-    
+    all_feature_source_cols = predictor_cols + [target_col] # These are the raw columns to derive features from
+
+    # Lags
+    for col in all_feature_source_cols:
+        col_name_in_feature = 'target' if col == target_col else col # Name used in the feature's column name
+        for lag in range(1, max_lags + 1):
+            df_feat[f'{col_name_in_feature}_lag_{lag}'] = df_feat[col].shift(lag)
+    # Diffs
+    for col in all_feature_source_cols:
+        col_name_in_feature = 'target' if col == target_col else col
+        for lag in [1, 2, 3, 7]: # Defined diff lags
+            df_feat[f'{col_name_in_feature}_diff_{lag}'] = df_feat[col].diff(lag)
+    # Rolling stats
+    windows = [3, 7, 14, 21]
+    for col in all_feature_source_cols:
+        col_name_in_feature = 'target' if col == target_col else col
+        for window in windows:
+            # Shift(1) is crucial: rolling stats use data up to t-1 for predicting t
+            df_feat[f'{col_name_in_feature}_roll_mean_{window}'] = df_feat[col].rolling(window=window, min_periods=1).mean().shift(1)
+            df_feat[f'{col_name_in_feature}_roll_std_{window}'] = df_feat[col].rolling(window=window, min_periods=1).std().shift(1)
+            df_feat[f'{col_name_in_feature}_roll_min_{window}'] = df_feat[col].rolling(window=window, min_periods=1).min().shift(1)
+            df_feat[f'{col_name_in_feature}_roll_max_{window}'] = df_feat[col].rolling(window=window, min_periods=1).max().shift(1)
+            df_feat[f'{col_name_in_feature}_roll_median_{window}'] = df_feat[col].rolling(window=window, min_periods=1).median().shift(1)
+    # EWM
+    for col in all_feature_source_cols:
+        col_name_in_feature = 'target' if col == target_col else col
+        for alpha in [0.1, 0.3, 0.5]: # Defined EWM alphas
+            df_feat[f'{col_name_in_feature}_ewm_mean_{alpha}'] = df_feat[col].ewm(alpha=alpha, min_periods=1).mean().shift(1)
+    # Cross-correlation (only between predictor_cols)
+    for i, col1 in enumerate(predictor_cols):
+        for j, col2 in enumerate(predictor_cols[i+1:], i+1): # Avoid redundant pairs and self-correlation
+            for window in [7, 14]: # Defined cross-corr windows
+                df_feat[f'{col1}_{col2}_rolling_corr_{window}'] = df_feat[col1].rolling(window=window, min_periods=1).corr(df_feat[col2]).shift(1)
+            df_feat[f'{col1}_{col2}_ratio'] = (df_feat[col1] / (df_feat[col2] + 1e-8)).shift(1) # Add 1e-8 to avoid division by zero
+    # Aggregate features (from predictor_cols)
+    if len(predictor_cols) > 1:
+        predictor_data = df_feat[predictor_cols] # Use original data, then shift
+        df_feat['all_metrics_mean'] = predictor_data.mean(axis=1).shift(1)
+        df_feat['all_metrics_std'] = predictor_data.std(axis=1).shift(1)
+        df_feat['all_metrics_sum'] = predictor_data.sum(axis=1).shift(1)
+        df_feat['all_metrics_max'] = predictor_data.max(axis=1).shift(1)
+        df_feat['all_metrics_min'] = predictor_data.min(axis=1).shift(1)
+    # Temporal features (derived from 'ds' column)
+    df_feat['dow'] = df_feat['ds'].dt.dayofweek
+    df_feat['month'] = df_feat['ds'].dt.month
+    df_feat['quarter'] = df_feat['ds'].dt.quarter
+    df_feat['week'] = df_feat['ds'].dt.isocalendar().week.astype(int)
+    df_feat['dayofyear'] = df_feat['ds'].dt.dayofyear
+    df_feat['is_weekend'] = (df_feat['dow'] >= 5).astype(int)
+    df_feat['is_month_start'] = df_feat['ds'].dt.is_month_start.astype(int)
+    df_feat['is_month_end'] = df_feat['ds'].dt.is_month_end.astype(int)
+    # Cyclical features
+    df_feat['dow_sin'] = np.sin(2 * np.pi * df_feat['dow'] / 7)
+    df_feat['dow_cos'] = np.cos(2 * np.pi * df_feat['dow'] / 7)
+    df_feat['month_sin'] = np.sin(2 * np.pi * df_feat['month'] / 12)
+    df_feat['month_cos'] = np.cos(2 * np.pi * df_feat['month'] / 12)
+    df_feat['dayofyear_sin'] = np.sin(2 * np.pi * df_feat['dayofyear'] / 365.25) # Use 365.25 for leap years
+    df_feat['dayofyear_cos'] = np.cos(2 * np.pi * df_feat['dayofyear'] / 365.25)
     # Interaction features
-    df['weekend_evening'] = df['is_weekend'] * (df['hour'] >= 18).astype(int)
-    df['friday_evening'] = df['is_friday'] * (df['hour'] >= 17).astype(int)
-    
-    return df
+    df_feat['dow_month_interaction'] = df_feat['dow'] * df_feat['month'] # Example interaction
+    # Trend features
+    df_feat['linear_trend'] = range(len(df_feat))
+    df_feat['quadratic_trend'] = df_feat['linear_trend'] ** 2
+    # Volatility (example: for target column, based on its own past)
+    # This calculates absolute difference between y(t-1) and its rolling mean at t-1
+    for window in [7, 14]:
+        rolling_mean_target = df_feat[target_col].rolling(window=window, min_periods=1).mean().shift(1)
+        df_feat[f'volatility_{window}'] = (df_feat[target_col].shift(1) - rolling_mean_target).abs()
 
-@st.cache_data
-def create_comprehensive_features(df, metric, ir_holidays):
-    """Create comprehensive feature set for correlation analysis"""
-    temp_df = df.copy()
-    temp_df['ds'] = pd.to_datetime(temp_df['Date'])
-    feature_df = temp_df[['ds', metric]].rename(columns={metric: 'y'}).dropna().set_index('ds')
-    
-    # Create temporal features
-    temporal_features = create_temporal_features(feature_df.index)
-    feature_df = pd.concat([feature_df, temporal_features], axis=1)
-    
-    # Create ALL possible lag features
-    for lag in range(1, 31):  # 1 to 30 days
-        feature_df[f'y_lag{lag}'] = feature_df['y'].shift(lag)
-    
-    # Create ALL possible rolling features
-    rolling_windows = [3, 7, 14, 21, 30, 60, 90]
-    for window in rolling_windows:
-        feature_df[f'y_rolling_mean_{window}'] = feature_df['y'].rolling(window, min_periods=1).mean()
-        feature_df[f'y_rolling_std_{window}'] = feature_df['y'].rolling(window, min_periods=1).std()
-        feature_df[f'y_rolling_max_{window}'] = feature_df['y'].rolling(window, min_periods=1).max()
-        feature_df[f'y_rolling_min_{window}'] = feature_df['y'].rolling(window, min_periods=1).min()
-        feature_df[f'y_rolling_median_{window}'] = feature_df['y'].rolling(window, min_periods=1).median()
-    
-    # Create ALL EMA features
-    ema_alphas = [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
-    for alpha in ema_alphas:
-        feature_df[f'y_ema_{alpha}'] = feature_df['y'].ewm(alpha=alpha).mean()
-    
-    # Create ALL percentage change features
-    pct_periods = [1, 2, 3, 7, 14, 21, 30]
-    for period in pct_periods:
-        feature_df[f'y_pct_change_{period}d'] = feature_df['y'].pct_change(period)
-    
-    # Create volatility features
-    vol_windows = [7, 14, 30]
-    for window in vol_windows:
-        rolling_std = feature_df['y'].rolling(window, min_periods=1).std()
-        rolling_mean = feature_df['y'].rolling(window, min_periods=1).mean()
-        feature_df[f'y_volatility_{window}'] = rolling_std / (rolling_mean + 1e-8)
-    
-    # Create trend features (slope over different windows)
-    trend_windows = [3, 7, 14, 21]
-    for window in trend_windows:
-        feature_df[f'y_trend_{window}'] = feature_df['y'].rolling(window, min_periods=2).apply(
-            lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) >= 2 else 0
-        )
-    
-    # Holiday effects
-    holiday_dates = set(pd.to_datetime(list(ir_holidays.keys())).date)
-    
-    if hasattr(feature_df.index, 'date'):
-        date_series = pd.Series(feature_df.index.date, index=feature_df.index)
-    else:
-        date_series = pd.Series([d.date() for d in feature_df.index], index=feature_df.index)
-    
-    feature_df['is_holiday'] = date_series.map(lambda x: 1 if x in holiday_dates else 0)
-    
-    # Global trend
-    feature_df['trend'] = np.arange(len(feature_df))
-    
-    # Clean up NaN values
-    feature_df = feature_df.replace([np.inf, -np.inf], np.nan)
-    
-    # Fill NaN values strategically
-    numeric_cols = feature_df.select_dtypes(include=[np.number]).columns
-    for col in numeric_cols:
-        if col == 'y':
+    return df_feat
+
+def select_features_by_correlation(X, y, threshold=0.1):
+    correlations = {}
+    # selected_features_init = [] # Not used
+    for col in X.columns:
+        if not X[col].isna().all(): # Ensure column is not all NaN
+            # Align X[col] and y by dropping NaNs from both series based on their shared index
+            temp_df = pd.DataFrame({'x_col': X[col], 'y_col': y}).dropna()
+            if len(temp_df) < 2: # Pearson R needs at least 2 samples
+                continue
+            try:
+                # Fill remaining NaNs in X[col] with 0 for correlation calculation AFTER alignment
+                # This is a simplified strategy; mean/median imputation could be better
+                corr, p_value = pearsonr(temp_df['x_col'], temp_df['y_col'])
+                if abs(corr) >= threshold and p_value < 0.05: # Use >= for threshold
+                    correlations[col] = abs(corr)
+            except ValueError: # Handles cases like all constant values after dropna
+                pass
+
+    sorted_features_corr = sorted(correlations.items(), key=lambda x: x[1], reverse=True)
+
+    selected_features_multicollinearity = []
+    # Multicollinearity check
+    for feature, corr_val in sorted_features_corr:
+        add_feature = True
+        for selected_feature_mc in selected_features_multicollinearity:
+            # Align feature and selected_feature_mc
+            temp_df_mc = pd.DataFrame({'feat1': X[feature], 'feat2': X[selected_feature_mc]}).dropna()
+            if len(temp_df_mc) < 2:
+                continue
+            try:
+                # Similar NaN handling as above for the pair being checked
+                feature_corr_mc = pearsonr(temp_df_mc['feat1'], temp_df_mc['feat2'])[0]
+                if abs(feature_corr_mc) > 0.8: # Threshold for multicollinearity
+                    add_feature = False
+                    break
+            except ValueError:
+                pass
+        if add_feature:
+            selected_features_multicollinearity.append(feature)
+
+    return selected_features_multicollinearity, correlations
+
+
+def evaluate_forecast_horizons(X_train, y_train, X_test, y_test, max_horizon=7):
+    horizon_results = {}
+    for horizon in range(1, max_horizon + 1):
+        y_train_h = y_train.shift(-horizon + 1).dropna()
+        X_train_h = X_train.iloc[:len(y_train_h)]
+
+        if len(y_train_h) < 30: # Ensure enough samples for training
+            st.warning(f"Skipping horizon {horizon} due to insufficient data ({len(y_train_h)} samples)")
             continue
-        if 'pct_change' in col or 'trend' in col:
-            feature_df[col] = feature_df[col].fillna(0)
+
+        model = LGBMRegressor(n_estimators=100, learning_rate=0.1, num_leaves=15, max_depth=6, min_child_samples=20, random_state=42)
+        tscv = TimeSeriesSplit(n_splits=3) # Use at least 3 splits if data allows
+        cv_scores = []
+
+        # Check if X_train_h is empty or too small for even one split
+        if len(X_train_h) < tscv.get_n_splits() + 10: # Heuristic check
+             st.warning(f"Skipping horizon {horizon} due to insufficient data for CV ({len(X_train_h)} samples)")
+             continue
+
+        for train_idx, val_idx in tscv.split(X_train_h):
+            if len(train_idx) < 10 or len(val_idx) < 1: # Ensure splits are meaningful
+                continue
+            X_tr, X_val = X_train_h.iloc[train_idx], X_train_h.iloc[val_idx]
+            y_tr, y_val = y_train_h.iloc[train_idx], y_train_h.iloc[val_idx]
+
+            model.fit(X_tr, y_tr)
+            pred_val = model.predict(X_val)
+            cv_scores.append(mean_absolute_error(y_val, pred_val))
+
+        if cv_scores: # Ensure scores were actually calculated
+            horizon_results[horizon] = np.mean(cv_scores)
         else:
-            feature_df[col] = feature_df[col].fillna(feature_df[col].median())
-    
-    return feature_df.reset_index()
+            horizon_results[horizon] = np.nan # Indicate failure for this horizon
 
-@st.cache_data
-def train_enhanced_xgboost(feature_df, metric_name, correlation_threshold=0.1):
-    """Enhanced XGBoost training with correlation-based feature selection"""
-    
-    # Perform correlation analysis and feature selection
-    selected_features, correlation_info = analyze_feature_correlations(
-        feature_df, 'y', correlation_threshold
-    )
-    
-    if len(feature_df) < 30:
-        raise ValueError(f"Insufficient data: {len(feature_df)} rows")
-    
-    # Prepare data with selected features
-    model_data = feature_df[['ds', 'y'] + selected_features].copy()
-    model_data = model_data.dropna()
-    
-    if len(model_data) < 20:
-        raise ValueError("Too much data lost after cleaning")
-    
-    X = model_data[selected_features]
-    y = model_data['y']
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Enhanced XGBoost parameters
-    xgb_model = xgb.XGBRegressor(
-        n_estimators=200,
-        max_depth=7,
-        learning_rate=0.08,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        random_state=42,
-        n_jobs=-1,
-        tree_method='hist',
-        early_stopping_rounds=20
-    )
-    
-    # Train/validation split
-    train_size = int(0.85 * len(X_scaled))
-    X_train, X_val = X_scaled[:train_size], X_scaled[train_size:]
-    y_train, y_val = y[:train_size], y[train_size:]
-    
-    # Train with early stopping
-    xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-    
-    return xgb_model, scaler, selected_features, model_data, correlation_info
+    return horizon_results
 
-# ------------- TREND-AWARE ITERATIVE FORECASTING ---------------
+# Main processing loop
+h_list = hospitals if sel_hosp == "All" else [sel_hosp]
+t_list = targets if sel_target == "All" else [sel_target]
+results = [] # To store summary results if needed
 
-def trend_aware_iterative_forecast(xgb_model, scaler, features, model_data, forecast_periods=14):
-    """Enhanced iterative forecasting that maintains trends"""
-    
-    # Pre-allocate arrays
-    forecasts = np.zeros(forecast_periods)
-    forecast_dates = []
-    
-    # Convert to numpy for faster operations
-    historical_values = model_data['y'].values
-    last_date = pd.to_datetime(model_data['ds'].iloc[-1])
-    
-    # Calculate recent trend to guide forecasting
-    recent_window = min(14, len(historical_values))
-    recent_trend = fast_trend_calculation(historical_values, recent_window)
-    
-    # Calculate recent volatility for realistic bounds
-    recent_volatility = np.std(historical_values[-recent_window:]) if recent_window > 1 else 0
-    
-    # Working array for iterative updates
-    working_values = historical_values.copy()
-    
-    # Calculate base patterns from historical data
-    base_patterns = {}
-    if len(historical_values) >= 7:
-        # Weekly patterns
-        for dow in range(7):
-            dow_values = []
-            for i in range(len(model_data)):
-                if pd.to_datetime(model_data['ds'].iloc[i]).dayofweek == dow:
-                    dow_values.append(historical_values[i])
-            if dow_values:
-                base_patterns[f'dow_{dow}'] = np.mean(dow_values)
-    
-    for i in range(forecast_periods):
-        # Calculate next date
-        next_date = last_date + pd.Timedelta(days=1)
-        
-        # Create feature dictionary
-        next_features = {}
-        
-        # Temporal features
-        next_features['year'] = next_date.year
-        next_features['month'] = next_date.month
-        next_features['day'] = next_date.day
-        next_features['dayofweek'] = next_date.dayofweek
-        next_features['hour'] = next_date.hour
-        next_features['week_of_year'] = next_date.isocalendar().week
-        next_features['quarter'] = next_date.quarter
-        next_features['day_of_year'] = next_date.dayofyear
-        
-        # Cyclical features
-        next_features['hour_sin'] = np.sin(2 * np.pi * next_features['hour'] / 24)
-        next_features['hour_cos'] = np.cos(2 * np.pi * next_features['hour'] / 24)
-        next_features['dow_sin'] = np.sin(2 * np.pi * next_features['dayofweek'] / 7)
-        next_features['dow_cos'] = np.cos(2 * np.pi * next_features['dayofweek'] / 7)
-        next_features['month_sin'] = np.sin(2 * np.pi * next_features['month'] / 12)
-        next_features['month_cos'] = np.cos(2 * np.pi * next_features['month'] / 12)
-        next_features['quarter_sin'] = np.sin(2 * np.pi * next_features['quarter'] / 4)
-        next_features['quarter_cos'] = np.cos(2 * np.pi * next_features['quarter'] / 4)
-        
-        # Lag features with proper indexing
-        for lag in range(1, 31):
-            if f'y_lag{lag}' in features:
-                if len(working_values) >= lag:
-                    next_features[f'y_lag{lag}'] = working_values[-lag]
+# --- MODEL TRAINING AND HISTORICAL PREDICTION SETUP (Simplified for brevity) ---
+# This part needs to be robustly handled in the actual script.
+# We assume that by the time we reach the future forecasting loop, we have:
+# - lgb_model: a trained LGBMRegressor model
+# - scaler: a fitted StandardScaler
+# - selected_features: list of feature names used for training
+# - train_data, test_data: pandas DataFrames
+# - df_feat_hist: The DataFrame created by create_advanced_features on historical data (df2)
+# - test_pred: Predictions on the test set (y_test portion of historical data)
+
+for hosp in h_list:
+    st.header(f"🏥 Hospital: {hosp}")
+    df_h = df[df['Hospital'] == hosp].reset_index(drop=True)
+
+    # --- BEGIN MODIFICATION: Display Correlation Matrix ---
+    # This section calculates and displays the correlation matrix for the
+    # primary target metrics for the currently selected hospital.
+    # It helps in understanding relationships between these key metrics.
+    # Display correlation matrix for target columns for this hospital
+    hospital_target_cols = [col for col in targets if col in df_h.columns and not df_h[col].isna().all()] # Ensure column has some data
+    if len(hospital_target_cols) > 1: # Need at least 2 columns to make a correlation matrix
+        correlation_matrix = df_h[hospital_target_cols].corr()
+
+        st.subheader(f"Correlation Matrix of Target Metrics for {hosp}")
+        st.dataframe(correlation_matrix.style.background_gradient(cmap='coolwarm', axis=None).format("{:.2f}"))
+        st.markdown("---") # Add a separator
+    elif len(hospital_target_cols) <= 1 and hosp != "All": # Avoid message if "All" hospitals selected and some just don't have data
+         st.info(f"Not enough target columns with sufficient data to display a correlation matrix for {hosp}.")
+         st.markdown("---") # Add a separator
+    # --- END MODIFICATION: Display Correlation Matrix ---
+
+
+    for tgt in t_list:
+        st.subheader(f"🎯 Target: {tgt}")
+        if df_h[tgt].isna().any():
+            st.warning(f"⚠️ Skipping {tgt} due to null values in target")
+            continue
+
+        available_targets_for_hospital = [col for col in targets if col in df_h.columns and not df_h[col].isna().all()]
+
+        # df2 contains 'ds' and all available raw metrics for the hospital, including the current target (but not yet named 'y')
+        df2 = df_h[['Date'] + available_targets_for_hospital].rename(columns={'Date': 'ds'})
+        # Now, rename the current target column in df2 to 'y' for feature engineering convenience
+        df2_renamed_target = df2.rename(columns={tgt: 'y'})
+
+        # Create features on historical data (df2_renamed_target which has 'ds' and 'y')
+        # Pass available_targets_for_hospital to know which other metrics can be used for features
+        df_feat_hist = create_advanced_features(df2_renamed_target.copy(), 'y', available_targets_for_hospital, max_lags=7)
+
+        # Drop rows with too many NaNs after feature creation (mostly at the beginning due to lags/rolling windows)
+        df_feat_hist = df_feat_hist.dropna(thresh=int(len(df_feat_hist.columns) * 0.7)) # Keep rows with at least 70% non-NaNs
+
+        if len(df_feat_hist) < 50: # Check after NaN drop
+            st.warning(f"⚠️ Insufficient data for {tgt} after feature engineering (less than 50 rows). Skipping.")
+            continue
+
+        n = len(df_feat_hist)
+        train_size = int(0.75 * n) # Or another split ratio
+
+        train_df = df_feat_hist.iloc[:train_size].copy()
+        test_df = df_feat_hist.iloc[train_size:].copy()
+
+        # Identify feature columns for selection (exclude 'ds', 'y', and original raw data columns)
+        # Original raw data columns (like 'Tracker8am', etc.) should not be directly used if they are targets or 'y'
+        # and their derived features (lags, rolling of 'Tracker8am') are what we want.
+        potential_feature_cols = [col for col in df_feat_hist.columns if col not in ['ds', 'y'] + available_targets_for_hospital]
+
+        selected_features, feature_correlations = select_features_by_correlation(
+            train_df[potential_feature_cols].fillna(0), # Use .fillna(0) here as a precaution for correlation
+            train_df['y'],
+            threshold=correlation_threshold
+        )
+
+        if not selected_features:
+            st.warning(f"⚠️ No features selected for {tgt} based on correlation threshold. Skipping.")
+            continue
+
+        X_train = train_df[selected_features]
+        y_train = train_df['y']
+        X_test = test_df[selected_features]
+        y_test = test_df['y']
+
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train.fillna(0)) # Fill NaNs before scaling
+        X_test_scaled = scaler.transform(X_test.fillna(0))     # Fill NaNs before scaling
+
+        # Train LightGBM model
+        lgb_model = LGBMRegressor(n_estimators=150, learning_rate=0.05, num_leaves=20, max_depth=7, min_child_samples=15, random_state=42, n_jobs=-1)
+        lgb_model.fit(X_train_scaled, y_train)
+
+        # Predictions on test set (for historical evaluation and plotting)
+        test_pred = lgb_model.predict(X_test_scaled)
+        test_mae = mean_absolute_error(y_test, test_pred)
+        st.write(f"Test MAE for {tgt}: {test_mae:.2f}")
+
+        # --- Plotting historical actuals, train predictions, test predictions ---
+        # (Assuming this part exists and uses y_train, y_test, predictions on train (if any), test_pred)
+        # For example:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=train_df['ds'], y=y_train, mode='lines', name='Train Actual'))
+        fig.add_trace(go.Scatter(x=test_df['ds'], y=y_test, mode='lines', name='Test Actual'))
+        fig.add_trace(go.Scatter(x=test_df['ds'], y=test_pred, mode='lines', name='Test Forecast (LGBM)'))
+        # (Prophet baseline could also be added here if implemented)
+        # fig.update_layout(title=f"{hosp} - {tgt}: Historical vs Forecast", xaxis_title="Date", yaxis_title=tgt)
+        # st.plotly_chart(fig)
+
+        # --- BEGIN MODIFICATION: Refactored Future Forecasting Loop ---
+        # The following loop generates future forecasts day by day.
+        # For each future day, it meticulously recalculates all selected features
+        # based on the most up-to-date historical data (including previous forecasts).
+        # This ensures that features like lags, rolling means, etc., are accurately
+        # derived without using stale data from the initial historical feature engineering step.
+        st.write("🔮 Generating future forecasts...")
+
+        # Initialization for the future forecasting loop
+        # master_data_for_iteration holds 'ds' and original values of ALL available_targets_for_hospital (including current target, NOT YET RENAMED 'y')
+        # It is NOT modified during the loop. Used as a source for non-target metric history.
+        master_data_for_iteration = df2.copy() # df2 has 'ds' and original target names
+
+        # history_plus_forecasts_y: Starts with historical 'y' (train actuals + test predictions)
+        # and gets appended with new future_y_predictions.
+        # Note: Using actual y_train and y_test might be better if available and makes sense for "true" history.
+        # However, if we want features based on what model *would have seen*, using test_pred is more aligned.
+        # For this refactor, let's use train_df['y'] (actuals) and test_pred (model's view of test period).
+        # Or, more simply, use the 'y' column from df_feat_hist which was used for training/testing.
+
+        # y_history_for_features contains actual historical values of 'y' up to the end of the test period.
+        # df_feat_hist['y'] contains the values of 'tgt' after it was renamed to 'y'.
+        y_history_for_features = df_feat_hist['y'].tolist() # This is historical 'y' used for training/testing features
+
+        future_y_predictions = [] # Stores only the final predicted 'y' values for the future_days horizon
+
+        last_known_date_overall = df_feat_hist['ds'].iloc[-1] # Last date from historical features
+
+        # Constants for feature generation (mirroring create_advanced_features)
+        MAX_LAGS = 7
+        ROLLING_WINDOWS = [3, 7, 14, 21]
+        EWM_ALPHAS = [0.1, 0.3, 0.5]
+        DIFF_LAGS = [1, 2, 3, 7] # From create_advanced_features
+        CROSS_CORR_WINDOWS = [7, 14] # From create_advanced_features
+        VOLATILITY_WINDOWS = [7, 14] # From create_advanced_features
+
+        # The main forecasting loop
+        for day_idx in range(future_days):
+            next_future_date = last_known_date_overall + pd.Timedelta(days=day_idx + 1)
+            current_step_features = pd.Series(index=selected_features, dtype=np.float64)
+
+            # For calculating features for 'next_future_date':
+            # - Target-related features (lags, rolling of 'y') use 'y_history_for_features'.
+            # - Other metric features use their historical series from 'master_data_for_iteration'.
+            # - Temporal features use 'next_future_date'.
+
+            # --- Temporal and Cyclical Features ---
+            temp_date_series = pd.Series([next_future_date])
+            current_step_features['dow'] = temp_date_series.dt.dayofweek.iloc[0]
+            current_step_features['month'] = temp_date_series.dt.month.iloc[0]
+            current_step_features['quarter'] = temp_date_series.dt.quarter.iloc[0]
+            current_step_features['week'] = temp_date_series.dt.isocalendar().week.astype(int).iloc[0]
+            current_step_features['dayofyear'] = temp_date_series.dt.dayofyear.iloc[0]
+            current_step_features['is_weekend'] = (current_step_features['dow'] >= 5).astype(int)
+            current_step_features['is_month_start'] = temp_date_series.dt.is_month_start.astype(int).iloc[0]
+            current_step_features['is_month_end'] = temp_date_series.dt.is_month_end.astype(int).iloc[0]
+            current_step_features['dow_sin'] = np.sin(2 * np.pi * current_step_features['dow'] / 7)
+            current_step_features['dow_cos'] = np.cos(2 * np.pi * current_step_features['dow'] / 7)
+            current_step_features['month_sin'] = np.sin(2 * np.pi * current_step_features['month'] / 12)
+            current_step_features['month_cos'] = np.cos(2 * np.pi * current_step_features['month'] / 12)
+            current_step_features['dayofyear_sin'] = np.sin(2 * np.pi * current_step_features['dayofyear'] / 365.25)
+            current_step_features['dayofyear_cos'] = np.cos(2 * np.pi * current_step_features['dayofyear'] / 365.25)
+            current_step_features['dow_month_interaction'] = current_step_features['dow'] * current_step_features['month']
+
+            # --- Trend Features ---
+            # Linear trend continues from the end of historical features
+            linear_trend_val = len(df_feat_hist) + day_idx
+            current_step_features['linear_trend'] = linear_trend_val
+            current_step_features['quadratic_trend'] = linear_trend_val ** 2
+
+            # --- Iterate over selected_features to calculate them ---
+            for feature_name in selected_features:
+                if feature_name in current_step_features and pd.notna(current_step_features[feature_name]):
+                    continue # Already calculated (e.g. temporal, trend)
+
+                # --- Target-related features (lags, diffs, rolling, ewm, volatility of 'y') ---
+                # These use 'y_history_for_features' which contains y(t-1), y(t-2), ...
+                y_series_for_calc = pd.Series(y_history_for_features) # Convert list to Series for .diff, .rolling, .ewm
+
+                if feature_name.startswith('target_lag_'):
+                    lag = int(feature_name.split('_')[-1])
+                    if lag <= len(y_series_for_calc):
+                        current_step_features[feature_name] = y_series_for_calc.iloc[-lag]
+                    else: current_step_features[feature_name] = np.nan
+
+                elif feature_name.startswith('target_diff_'):
+                    lag = int(feature_name.split('_')[-1])
+                    if len(y_series_for_calc) >= lag : # .diff(lag) needs at least lag+1 points to produce a non-NaN value at the end
+                        current_step_features[feature_name] = y_series_for_calc.diff(lag).iloc[-1]
+                    else: current_step_features[feature_name] = np.nan
+
+                elif feature_name.startswith('target_roll_'): # mean, std, min, max, median
+                    parts = feature_name.split('_')
+                    stat = parts[2]
+                    window = int(parts[3])
+                    # shift(1) was used in create_advanced_features, meaning rolling stats are based on t-1 data.
+                    # y_series_for_calc already represents data up to t-1.
+                    if len(y_series_for_calc) >= 1 : # Need at least 1 point for rolling
+                        if stat == 'mean': current_step_features[feature_name] = y_series_for_calc.rolling(window=window, min_periods=1).mean().iloc[-1]
+                        elif stat == 'std': current_step_features[feature_name] = y_series_for_calc.rolling(window=window, min_periods=1).std().iloc[-1]
+                        elif stat == 'min': current_step_features[feature_name] = y_series_for_calc.rolling(window=window, min_periods=1).min().iloc[-1]
+                        elif stat == 'max': current_step_features[feature_name] = y_series_for_calc.rolling(window=window, min_periods=1).max().iloc[-1]
+                        elif stat == 'median': current_step_features[feature_name] = y_series_for_calc.rolling(window=window, min_periods=1).median().iloc[-1]
+                    else: current_step_features[feature_name] = np.nan
+
+                elif feature_name.startswith('target_ewm_mean_'):
+                    alpha = float(feature_name.split('_')[-1])
+                    if len(y_series_for_calc) >=1:
+                        current_step_features[feature_name] = y_series_for_calc.ewm(alpha=alpha, min_periods=1).mean().iloc[-1]
+                    else: current_step_features[feature_name] = np.nan
+
+                elif feature_name.startswith('volatility_'): # Target volatility
+                    window = int(feature_name.split('_')[-1])
+                    # Original: (df_feat[target_col].shift(1) - df_feat[target_col].rolling(window=W, min_periods=1).mean().shift(1)).abs()
+                    # This means volatility for predicting time t is:
+                    # abs( y(t-1) - mean_of_y_values_from_t-W-1_to_t-2 ) where the mean is taken at t-1.
+                    # y_series_for_calc is history up to y(t-1).
+                    if len(y_series_for_calc) >= 1: # Need y(t-1)
+                        y_t_minus_1 = y_series_for_calc.iloc[-1]
+                        if len(y_series_for_calc) >= 2 : # Need at least one value for the shifted rolling mean (history up to t-2)
+                            # Series for rolling mean should end at y(t-2)
+                            series_for_rolling_mean = y_series_for_calc.iloc[:-1]
+                            if not series_for_rolling_mean.empty:
+                                rolling_mean_shifted = series_for_rolling_mean.rolling(window=window, min_periods=1).mean().iloc[-1]
+                                current_step_features[feature_name] = abs(y_t_minus_1 - rolling_mean_shifted)
+                            else: # Not enough history for shifted rolling mean
+                                current_step_features[feature_name] = np.nan
+                        else: # Not enough history for shifted rolling mean
+                             current_step_features[feature_name] = np.nan
+                    else: # Not enough history for y(t-1)
+                        current_step_features[feature_name] = np.nan
+
+                # --- Other Metric Features (lags, diffs, rolling, ewm from 'master_data_for_iteration') ---
+                # And Cross-Correlation and Aggregate features
                 else:
-                    next_features[f'y_lag{lag}'] = np.mean(working_values) if len(working_values) > 0 else 0
-        
-        # Rolling statistics
-        for window in [3, 7, 14, 21, 30, 60, 90]:
-            for stat in ['mean', 'std', 'max', 'min', 'median']:
-                feature_name = f'y_rolling_{stat}_{window}'
-                if feature_name in features:
-                    if stat == 'mean':
-                        mean_val, _, _, _, _ = fast_rolling_stats(working_values, window)
-                        next_features[feature_name] = mean_val
-                    elif stat == 'std':
-                        _, std_val, _, _, _ = fast_rolling_stats(working_values, window)
-                        next_features[feature_name] = std_val
-                    elif stat == 'max':
-                        _, _, max_val, _, _ = fast_rolling_stats(working_values, window)
-                        next_features[feature_name] = max_val
-                    elif stat == 'min':
-                        _, _, _, min_val, _ = fast_rolling_stats(working_values, window)
-                        next_features[feature_name] = min_val
-                    elif stat == 'median':
-                        _, _, _, _, median_val = fast_rolling_stats(working_values, window)
-                        next_features[feature_name] = median_val
-        
-        # EMA features
-        for alpha in [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]:
-            feature_name = f'y_ema_{alpha}'
-            if feature_name in features:
-                next_features[feature_name] = fast_ema(working_values, alpha)
-        
-        # Percentage change features
-        for period in [1, 2, 3, 7, 14, 21, 30]:
-            feature_name = f'y_pct_change_{period}d'
-            if feature_name in features:
-                next_features[feature_name] = fast_pct_change(working_values, period)
-        
-        # Volatility features
-        for window in [7, 14, 30]:
-            feature_name = f'y_volatility_{window}'
-            if feature_name in features:
-                next_features[feature_name] = fast_volatility(working_values, window)
-        
-        # Trend features
-        for window in [3, 7, 14, 21]:
-            feature_name = f'y_trend_{window}'
-            if feature_name in features:
-                next_features[feature_name] = fast_trend_calculation(working_values, window)
-        
-        # Pattern features
-        next_features['is_weekend'] = 1 if next_features['dayofweek'] >= 5 else 0
-        next_features['is_monday'] = 1 if next_features['dayofweek'] == 0 else 0
-        next_features['is_friday'] = 1 if next_features['dayofweek'] == 4 else 0
-        next_features['is_spring'] = 1 if next_features['month'] in [3, 4, 5] else 0
-        next_features['is_summer'] = 1 if next_features['month'] in [6, 7, 8] else 0
-        next_features['is_autumn'] = 1 if next_features['month'] in [9, 10, 11] else 0
-        next_features['is_winter'] = 1 if next_features['month'] in [12, 1, 2] else 0
-        next_features['weekend_evening'] = next_features['is_weekend'] * (1 if next_features['hour'] >= 18 else 0)
-        next_features['friday_evening'] = next_features['is_friday'] * (1 if next_features['hour'] >= 17 else 0)
-        next_features['is_holiday'] = 0  # Simplified
-        next_features['trend'] = len(working_values)
-        
-        # Fill any missing features
-        for feature in features:
-            if feature not in next_features:
-                next_features[feature] = 0
-        
-        # Create feature vector
-        feature_vector = np.array([next_features.get(f, 0) for f in features]).reshape(1, -1)
-        
-        # Scale and predict
-        feature_vector_scaled = scaler.transform(feature_vector)
-        base_prediction = xgb_model.predict(feature_vector_scaled)[0]
-        
-        # Apply trend adjustment to maintain continuity
-        if i == 0:
-            # For first prediction, apply recent trend more strongly
-            trend_adjustment = recent_trend * 0.5
-        else:
-            # For subsequent predictions, use a mix of model trend and recent trend
-            model_trend = forecasts[i-1] - working_values[-1] if i == 1 else forecasts[i-1] - forecasts[i-2]
-            trend_adjustment = 0.7 * model_trend + 0.3 * recent_trend
-        
-        # Combine base prediction with trend adjustment
-        adjusted_prediction = base_prediction + trend_adjustment
-        
-        # Apply pattern-based adjustments using historical data
-        dow_pattern_key = f'dow_{next_features["dayofweek"]}'
-        if dow_pattern_key in base_patterns:
-            pattern_adjustment = 0.1 * (base_patterns[dow_pattern_key] - np.mean(historical_values))
-            adjusted_prediction += pattern_adjustment
-        
-        # Apply realistic bounds based on historical volatility
-        recent_mean = np.mean(working_values[-7:]) if len(working_values) >= 7 else np.mean(working_values)
-        lower_bound = recent_mean - 3 * recent_volatility
-        upper_bound = recent_mean + 3 * recent_volatility
-        
-        # Ensure non-negative and within reasonable bounds
-        final_prediction = max(0, min(upper_bound, max(lower_bound, adjusted_prediction)))
-        
-        # Update working data
-        working_values = np.append(working_values, final_prediction)
-        
-        # Store results
-        forecasts[i] = final_prediction
-        forecast_dates.append(next_date)
-        last_date = next_date
-    
-    return forecasts.tolist(), forecast_dates
+                    # Check if feature involves other metrics
+                    found_other_metric_feature = False
+                    for other_metric_original_name in available_targets_for_hospital:
+                        if other_metric_original_name == tgt: continue # Skip 'y' itself
 
-# ------------- EVALUATION AND VISUALIZATION ---------------
+                        # Check for lags, diffs, rolling, ewm of other_metric_original_name
+                        # These use the historical series from master_data_for_iteration[other_metric_original_name]
+                        # The shift(1) in create_advanced_features means these are based on data up to t-1.
+                        metric_series_hist = master_data_for_iteration[other_metric_original_name] # Full history of this metric
 
-def enhanced_evaluate_model(xgb_model, scaler, features, model_data):
-    """Enhanced model evaluation with feature importance"""
-    test_size = min(14, len(model_data) // 4)
-    test_size = max(3, test_size)
-    
-    test_data = model_data.tail(test_size).copy()
-    
-    X_test = test_data[features].fillna(0)
-    X_test_scaled = scaler.transform(X_test)
-    y_true = test_data['y'].values
-    y_pred = xgb_model.predict(X_test_scaled)
-    
-    # Calculate metrics
-    mae = np.mean(np.abs(y_true - y_pred))
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    mape = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1))) * 100
-    
-    # Feature importance
-    feature_importance = pd.DataFrame({
-        'feature': features,
-        'importance': xgb_model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
-    metrics = {'MAE': mae, 'RMSE': rmse, 'MAPE': mape}
-    return metrics, y_true, y_pred, test_data['ds'].values, feature_importance
+                        if feature_name.startswith(f'{other_metric_original_name}_lag_'):
+                            lag = int(feature_name.split('_')[-1])
+                            if lag <= len(metric_series_hist): current_step_features[feature_name] = metric_series_hist.iloc[-lag]
+                            else: current_step_features[feature_name] = np.nan
+                            found_other_metric_feature = True; break
 
-def create_enhanced_plot(historical_dates, historical_values, test_pred_dates, test_pred_values, 
-                        forecast_dates, forecast_values, metric_name):
-    """Enhanced plotting with trend analysis"""
-    fig = make_subplots(
-        rows=2, cols=1, 
-        subplot_titles=(f'{metric_name} - Forecast Results', 'Recent Trend Analysis'),
-        vertical_spacing=0.12,
-        row_heights=[0.7, 0.3]
-    )
-    
-    # Main forecast plot
-    fig.add_trace(go.Scatter(
-        x=historical_dates, y=historical_values,
-        mode='lines', name='Historical Data',
-        line=dict(color='blue', width=2)
-    ), row=1, col=1)
-    
-    # Test predictions
-    if len(test_pred_dates) > 0:
-        fig.add_trace(go.Scatter(
-            x=test_pred_dates, y=test_pred_values,
-            mode='lines+markers', name='Test Predictions',
-            line=dict(color='orange', width=2, dash='dash'),
-            marker=dict(size=6)
-        ), row=1, col=1)
-    
-    # Forecast
-    fig.add_trace(go.Scatter(
-        x=forecast_dates, y=forecast_values,
-        mode='lines+markers', name='Forecast',
-        line=dict(color='red', width=3),
-        marker=dict(size=8, symbol='diamond')
-    ), row=1, col=1)
-    
-    # Recent trend analysis (last 30 days)
-    recent_days = min(30, len(historical_values))
-    recent_dates = historical_dates[-recent_days:]
-    recent_values = historical_values[-recent_days:]
-    
-    fig.add_trace(go.Scatter(
-        x=recent_dates, y=recent_values,
-        mode='lines+markers', name='Recent Trend',
-        line=dict(color='green', width=2),
-        marker=dict(size=4)
-    ), row=2, col=1)
-    
-    # Add trend line
-    if len(recent_values) >= 2:
-        x_numeric = np.arange(len(recent_values))
-        trend_coef = np.polyfit(x_numeric, recent_values, 1)
-        trend_line = np.poly1d(trend_coef)(x_numeric)
-        
-        fig.add_trace(go.Scatter(
-            x=recent_dates, y=trend_line,
-            mode='lines', name='Trend Line',
-            line=dict(color='purple', width=2, dash='dot')
-        ), row=2, col=1)
-    
-    # Layout
-    fig.update_layout(
-        height=700,
-        title_text=f"Enhanced {metric_name} Forecast Analysis",
-        showlegend=True,
-        hovermode='x unified'
-    )
-    
-    fig.update_xaxes(title_text="Date", row=2, col=1)
-    fig.update_yaxes(title_text=metric_name, row=1, col=1)
-    fig.update_yaxes(title_text="Recent Values", row=2, col=1)
-    
-    return fig
+                        elif feature_name.startswith(f'{other_metric_original_name}_diff_'):
+                            lag = int(feature_name.split('_')[-1])
+                            # .diff(lag) needs at least lag points in history. iloc[-1] gets the latest diff.
+                            if len(metric_series_hist) > lag : current_step_features[feature_name] = metric_series_hist.diff(lag).iloc[-1]
+                            else: current_step_features[feature_name] = np.nan
+                            found_other_metric_feature = True; break
 
-# ------------- STREAMLIT APPLICATION ---------------
+                        elif feature_name.startswith(f'{other_metric_original_name}_roll_'):
+                            parts = feature_name.split('_') # e.g. MetricA_roll_mean_7
+                            stat = parts[2]
+                            window = int(parts[3])
+                            if len(metric_series_hist) >=1: # shift(1) in original means use data up to t-1
+                                if stat == 'mean': current_step_features[feature_name] = metric_series_hist.rolling(window=window, min_periods=1).mean().iloc[-1]
+                                elif stat == 'std': current_step_features[feature_name] = metric_series_hist.rolling(window=window, min_periods=1).std().iloc[-1]
+                                elif stat == 'min': current_step_features[feature_name] = metric_series_hist.rolling(window=window, min_periods=1).min().iloc[-1]
+                                elif stat == 'max': current_step_features[feature_name] = metric_series_hist.rolling(window=window, min_periods=1).max().iloc[-1]
+                                elif stat == 'median': current_step_features[feature_name] = metric_series_hist.rolling(window=window, min_periods=1).median().iloc[-1]
+                            else: current_step_features[feature_name] = np.nan
+                            found_other_metric_feature = True; break
 
-def main():
-    st.set_page_config(page_title="Enhanced Time Series Forecaster", layout="wide")
-    
-    st.title("🚀 Enhanced Time Series Forecaster")
-    st.markdown("Advanced XGBoost forecasting with correlation analysis and feature selection")
-    
-    # File upload
-    uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
-    
-    if uploaded_file is not None:
-        try:
-            # Load data
-            df = pd.read_csv(uploaded_file)
-            st.success(f"Data loaded: {len(df)} rows, {len(df.columns)} columns")
-            
-            # Display data info
-            with st.expander("Data Preview"):
-                st.dataframe(df.head())
-                st.write("**Columns:**", list(df.columns))
-            
-            # Column selection
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                date_col = st.selectbox("Select Date Column", df.columns)
-                
-            with col2:
-                metric_col = st.selectbox("Select Metric Column", 
-                                        [col for col in df.columns if col != date_col])
-            
-            # Parameters
-            with st.sidebar:
-                st.header("Forecasting Parameters")
-                forecast_days = st.slider("Forecast Days", 1, 30, 14)
-                correlation_threshold = st.slider("Correlation Threshold", 0.05, 0.3, 0.1, 0.01)
-                
-                st.header("Model Parameters")
-                show_correlations = st.checkbox("Show Feature Correlations", True)
-                show_importance = st.checkbox("Show Feature Importance", True)
-            
-            if st.button("🔮 Generate Forecast", type="primary"):
-                with st.spinner("Processing... This may take a moment"):
-                    
-                    # Prepare data
-                    df_clean = df[[date_col, metric_col]].copy()
-                    df_clean.columns = ['Date', metric_col]
-                    df_clean['Date'] = pd.to_datetime(df_clean['Date'])
-                    df_clean = df_clean.dropna().sort_values('Date')
-                    
-                    if len(df_clean) < 30:
-                        st.error("Need at least 30 data points for forecasting")
-                        return
-                    
-                    # Get holidays
-                    years = list(range(df_clean['Date'].dt.year.min(), 
-                                     df_clean['Date'].dt.year.max() + 2))
-                    ir_holidays = get_ireland_holidays(years)
-                    
-                    # Create features
-                    feature_df = create_comprehensive_features(df_clean, metric_col, ir_holidays)
-                    
-                    # Train model
-                    xgb_model, scaler, selected_features, model_data, correlation_info = train_enhanced_xgboost(
-                        feature_df, metric_col, correlation_threshold
-                    )
-                    
-                    # Evaluate model
-                    metrics, y_true, y_pred, test_dates, feature_importance = enhanced_evaluate_model(
-                        xgb_model, scaler, selected_features, model_data
-                    )
-                    
-                    # Generate forecast
-                    forecast_values, forecast_dates = trend_aware_iterative_forecast(
-                        xgb_model, scaler, selected_features, model_data, forecast_days
-                    )
-                    
-                    # Display results
-                    st.success("✅ Forecast completed!")
-                    
-                    # Metrics
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("MAE", f"{metrics['MAE']:.3f}")
-                    with col2:
-                        st.metric("RMSE", f"{metrics['RMSE']:.3f}")
-                    with col3:
-                        st.metric("MAPE", f"{metrics['MAPE']:.1f}%")
-                    
-                    # Plot
-                    historical_dates = pd.to_datetime(model_data['ds']).tolist()
-                    historical_values = model_data['y'].tolist()
-                    
-                    fig = create_enhanced_plot(
-                        historical_dates, historical_values,
-                        pd.to_datetime(test_dates).tolist(), y_pred.tolist(),
-                        forecast_dates, forecast_values,
-                        metric_col
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Additional analysis
-                    if show_correlations and len(correlation_info) > 0:
-                        with st.expander("🔗 Feature Correlations"):
-                            st.dataframe(correlation_info.head(20))
-                    
-                    if show_importance and len(feature_importance) > 0:
-                        with st.expander("⭐ Feature Importance"):
-                            st.dataframe(feature_importance.head(15))
-                    
-                    # Forecast table
-                    with st.expander("📊 Forecast Details"):
-                        forecast_df = pd.DataFrame({
-                            'Date': forecast_dates,
-                            'Forecast': forecast_values
-                        })
-                        st.dataframe(forecast_df)
-                        
-                        # Download button
-                        csv = forecast_df.to_csv(index=False)
-                        st.download_button(
-                            "Download Forecast CSV",
-                            csv,
-                            "forecast.csv",
-                            "text/csv"
-                        )
-                    
-                    st.info(f"✨ Used {len(selected_features)} selected features out of {len(feature_df.columns)-2} total features")
-                    
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            st.exception(e)
-    
-    else:
-        st.info("👆 Upload a CSV file to get started")
-        
-        # Example data format
-        with st.expander("📋 Expected Data Format"):
-            st.write("""
-            Your CSV should have:
-            - A date column (any standard date format)
-            - A numeric metric column to forecast
-            
-            Example:
-            ```
-            Date, Sales
-            2023-01-01, 100
-            2023-01-02, 120
-            2023-01-03, 95
-            ...
-            ```
-            """)
+                        elif feature_name.startswith(f'{other_metric_original_name}_ewm_mean_'):
+                            alpha = float(feature_name.split('_')[-1])
+                            if len(metric_series_hist) >= 1:
+                                current_step_features[feature_name] = metric_series_hist.ewm(alpha=alpha, min_periods=1).mean().iloc[-1]
+                            else: current_step_features[feature_name] = np.nan
+                            found_other_metric_feature = True; break
 
-if __name__ == "__main__":
-    main()
+                    if found_other_metric_feature: continue
+
+                    # --- Cross-Correlation and Ratio Features ---
+                    # Example: col1_col2_rolling_corr_W or col1_col2_ratio
+                    # These use historical series of col1 and col2 from master_data_for_iteration
+                    # The shift(1) in original means use data up to t-1.
+                    is_cross_feature = False
+                    for i_cf, col1_cf_name in enumerate(available_targets_for_hospital):
+                        if col1_cf_name == tgt: continue
+                        for j_cf, col2_cf_name in enumerate(available_targets_for_hospital): # Check all pairs for ratio, distinct pairs for corr
+                            if col2_cf_name == tgt: continue
+                            if col1_cf_name == col2_cf_name and not feature_name.endswith("_ratio"): continue # Corr is between distinct
+
+                            col1_series_hist = master_data_for_iteration[col1_cf_name]
+                            col2_series_hist = master_data_for_iteration[col2_cf_name]
+
+                            if feature_name.startswith(f'{col1_cf_name}_{col2_cf_name}_rolling_corr_'):
+                                window = int(feature_name.split('_')[-1])
+                                if len(col1_series_hist) >= 1 and len(col2_series_hist) >=1:
+                                     current_step_features[feature_name] = col1_series_hist.rolling(window=window, min_periods=1).corr(col2_series_hist).iloc[-1]
+                                else: current_step_features[feature_name] = np.nan
+                                is_cross_feature = True; break
+
+                            if feature_name == f'{col1_cf_name}_{col2_cf_name}_ratio':
+                                if len(col1_series_hist) >=1 and len(col2_series_hist) >=1:
+                                    current_step_features[feature_name] = col1_series_hist.iloc[-1] / (col2_series_hist.iloc[-1] + 1e-8)
+                                else: current_step_features[feature_name] = np.nan
+                                is_cross_feature = True; break
+                        if is_cross_feature: break
+                    if is_cross_feature: continue
+
+                    # --- Aggregate Features --- (all_metrics_mean, etc.)
+                    # These are based on predictor_cols from master_data_for_iteration at t-1
+                    predictor_metric_names = [col for col in available_targets_for_hospital if col != tgt]
+                    if len(predictor_metric_names) > 1:
+                        current_predictors_values = master_data_for_iteration[predictor_metric_names].iloc[-1] # Values at t-1
+                        if feature_name == 'all_metrics_mean': current_step_features[feature_name] = current_predictors_values.mean()
+                        elif feature_name == 'all_metrics_std': current_step_features[feature_name] = current_predictors_values.std()
+                        elif feature_name == 'all_metrics_sum': current_step_features[feature_name] = current_predictors_values.sum()
+                        elif feature_name == 'all_metrics_max': current_step_features[feature_name] = current_predictors_values.max()
+                        elif feature_name == 'all_metrics_min': current_step_features[feature_name] = current_predictors_values.min()
+                    # No 'else' here, if it's an agg feature not listed, it remains unhandled and will be NaN -> 0
+
+            # Fill any NaNs that resulted from feature calculation (e.g. insufficient history for a lag/window)
+            current_step_features_filled = current_step_features.fillna(0) # Or use training data means/medians
+
+            # Assemble feature vector for prediction, ensuring correct order
+            X_pred_df = pd.DataFrame([current_step_features_filled])
+            X_pred_df = X_pred_df[selected_features] # Ensure column order matches training
+
+            # Scale and Predict
+            X_pred_scaled = scaler.transform(X_pred_df)
+            predicted_y = lgb_model.predict(X_pred_scaled)[0]
+
+            future_y_predictions.append(predicted_y)
+            y_history_for_features.append(predicted_y) # Add current prediction to history for next step's features
+
+        # --- Future forecast plotting ---
+        if future_y_predictions:
+            last_historical_date = df_feat_hist['ds'].iloc[-1]
+            future_dates = pd.date_range(start=last_historical_date + pd.Timedelta(days=1), periods=future_days)
+            fig.add_trace(go.Scatter(x=future_dates, y=future_y_predictions, mode='lines', name=f'Future Forecast (LGBM) - {tgt}', line=dict(dash='dot')))
+
+        fig.update_layout(title=f"{hosp} - {tgt}: Forecast", xaxis_title="Date", yaxis_title=tgt)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- END MODIFICATION: Refactored Future Forecasting Loop ---
+
+# (Original summary results part could be added here if needed)
+# if results:
+#     results_df = pd.DataFrame(results)
+#     st.subheader("📊 Overall Model Performance Summary")
+#     st.dataframe(results_df)
+
+st.sidebar.success("✅ Forecasting complete!")
+
+print("Script execution finished.") # For debugging in non-Streamlit environment
+# End of provided script
