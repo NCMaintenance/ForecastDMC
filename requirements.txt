@@ -1,14 +1,5 @@
-streamlit
 pandas
 numpy
-openpyxl
-xgboost
-scikit-learn
-prophet
+streamlit
 plotly
-optuna
-seaborn
-statsmodels
-nixtla
-numba
-lightgbm
+openpyxl
