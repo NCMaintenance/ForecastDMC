@@ -526,17 +526,27 @@ def trend_aware_iterative_forecast(xgb_model, scaler, features, model_data, fore
 
             # Volatility features ('y_volatility_W')
             elif feature_name.startswith('y_volatility_'):
-                window_val = int(feature_name.replace('y_volatility_', ''))
-                # fast_volatility handles len < window and len <=1 returning 0.0
-                # It also returns 0.0 if mean is 0. This matches create_comprehensive_features behavior (div by mean+1e-8)
-                next_features_dict[feature_name] = fast_volatility(working_values, window_val)
+                window_str = feature_name.replace('y_volatility_', '')
+                if window_str.isdigit():
+                    window_val = int(window_str)
+                    # fast_volatility handles len < window and len <=1 returning 0.0
+                    # It also returns 0.0 if mean is 0. This matches create_comprehensive_features behavior (div by mean+1e-8)
+                    next_features_dict[feature_name] = fast_volatility(working_values, window_val)
+                else:
+                    # st.warning(f"Invalid window for volatility feature: {feature_name}. Skipping.") # Optional
+                    next_features_dict[feature_name] = np.nan
 
             # Trend features ('y_trend_W' for slope, or 'trend' for global)
             elif feature_name.startswith('y_trend_'): # Slope trend
-                window_val = int(feature_name.replace('y_trend_', ''))
-                # fast_trend_calculation handles len < window and len < 2 returning 0.0
-                # create_comprehensive_features for y_trend_W also results in 0 for insufficient points or after fillna.
-                next_features_dict[feature_name] = fast_trend_calculation(working_values, window_val)
+                window_str = feature_name.replace('y_trend_', '')
+                if window_str.isdigit():
+                    window_val = int(window_str)
+                    # fast_trend_calculation handles len < window and len < 2 returning 0.0
+                    # create_comprehensive_features for y_trend_W also results in 0 for insufficient points or after fillna.
+                    next_features_dict[feature_name] = fast_trend_calculation(working_values, window_val)
+                else:
+                    # st.warning(f"Invalid window for trend feature: {feature_name}. Skipping.") # Optional
+                    next_features_dict[feature_name] = np.nan
 
             elif feature_name == 'trend': # Global trend component
                 # This should be the count of historical + already forecasted points up to the PREVIOUS step.
