@@ -10,3 +10,4 @@ optuna
 seaborn
 statsmodels
 nixtla
+numba
