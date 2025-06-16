@@ -199,6 +199,9 @@ def evaluate_forecast_horizons(X_train, y_train, X_test, y_test, max_horizon=7):
 
             model.fit(X_tr, y_tr)
             pred_val = model.predict(X_val)
+            # Apply output constraints
+            pred_val = [round(p) for p in pred_val]
+            pred_val = [max(0, p) for p in pred_val]
             cv_scores.append(mean_absolute_error(y_val, pred_val))
 
         if cv_scores: # Ensure scores were actually calculated
@@ -331,6 +334,14 @@ for hosp in h_list:
                         horizon_df = pd.DataFrame.from_dict(filtered_horizon_results, orient='index', columns=['Mean CV MAE'])
                         horizon_df.index.name = 'Forecast Horizon (Days)'
                         st.dataframe(horizon_df.sort_index())
+                        st.caption("""
+                        **Note on Horizon Evaluation Methodology:**
+                        The MAE values above are calculated using a 'direct multi-step' evaluation strategy.
+                        This means for each horizon (e.g., 3 days ahead), a model is trained to predict that specific future point directly using historical features.
+                        This is different from the main forecasting process, which uses an 'iterative' strategy (predictions from day N-1 are used as features to predict day N).
+                        Therefore, these MAE scores provide an indication of performance but may differ from the final iterative forecast's accuracy.
+                        An increase in MAE with longer horizons is typical.
+                        """)
                     else:
                         st.info("Could not evaluate performance across different horizons (e.g., results were NaN for all horizons).")
                 else:
@@ -345,6 +356,9 @@ for hosp in h_list:
 
         # Predictions on test set (for historical evaluation and plotting)
         test_pred = lgb_model.predict(X_test_scaled)
+        # Apply output constraints
+        test_pred = [round(p) for p in test_pred]
+        test_pred = [max(0, p) for p in test_pred]
         test_mae = mean_absolute_error(y_test, test_pred)
         st.write(f"Test MAE for {tgt}: {test_mae:.2f}")
 
@@ -597,6 +611,10 @@ for hosp in h_list:
             # Scale and Predict
             X_pred_scaled = scaler.transform(X_pred_df)
             predicted_y = lgb_model.predict(X_pred_scaled)[0]
+
+            # Apply output constraints
+            predicted_y = round(predicted_y)
+            predicted_y = max(0, predicted_y)
 
             future_y_predictions.append(predicted_y)
             y_history_for_features.append(predicted_y) # Add current prediction to history for next step's features
