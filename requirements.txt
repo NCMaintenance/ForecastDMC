@@ -9,6 +9,6 @@ plotly
 optuna
 seaborn
 statsmodels
-nixtla
+shap
 numba
 lightgbm
