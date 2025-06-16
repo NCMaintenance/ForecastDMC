@@ -11,3 +11,4 @@ seaborn
 statsmodels
 nixtla
 numba
+lightgbm
