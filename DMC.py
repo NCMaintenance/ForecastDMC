@@ -104,7 +104,7 @@ if uploaded_file:
     st.subheader("📈 ED Model Performance")
     st.write(f"RMSE: {rmse:.2f}")
 
-    df_ed_test = df_ed.iloc[y_test.index].copy()
+    df_ed_test = df_ed.loc[y_test.index].copy()
     df_ed_test['Predicted'] = y_pred
     st.dataframe(df_ed_test[['Datetime', 'Hospital', 'Value', 'Predicted']].head(20))
 
@@ -143,7 +143,7 @@ if uploaded_file:
     rmse_t = np.sqrt(mean_squared_error(y_test_t, y_pred_t))
     st.write(f"Trolley RMSE: {rmse_t:.2f}")
 
-    df_t_test = df_trolley.iloc[y_test_t.index].copy()
+    df_t_test = df_trolley.loc[y_test_t.index].copy()
     df_t_test['Predicted'] = y_pred_t
     st.dataframe(df_t_test[['Datetime', 'Hospital', 'Value', 'Predicted']].head(20))
 
