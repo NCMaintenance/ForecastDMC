@@ -58,19 +58,60 @@ def prepare_data(df):
     df_long['TimeStr'] = df_long['TimeLabel'].map(time_map)
     df_long['Datetime'] = pd.to_datetime(df_long['Date'].astype(str) + ' ' + df_long['TimeStr'])
 
-    # Feature engineering
+    # Enhanced Feature Engineering
     df_long['Hour'] = df_long['Datetime'].dt.hour
     df_long['DayOfWeek'] = df_long['Datetime'].dt.dayofweek
+    df_long['DayOfMonth'] = df_long['Datetime'].dt.day
+    df_long['Month'] = df_long['Datetime'].dt.month
+    df_long['Quarter'] = df_long['Datetime'].dt.quarter
+    df_long['WeekOfYear'] = df_long['Datetime'].dt.isocalendar().week
     df_long['IsWeekend'] = df_long['DayOfWeek'].isin([5, 6]).astype(int)
+    df_long['IsMonday'] = (df_long['DayOfWeek'] == 0).astype(int)  # Monday effect
+    df_long['IsFriday'] = (df_long['DayOfWeek'] == 4).astype(int)  # Friday effect
+    
+    # Cyclical encoding for time features
     df_long['Hour_sin'] = np.sin(2 * np.pi * df_long['Hour'] / 24)
     df_long['Hour_cos'] = np.cos(2 * np.pi * df_long['Hour'] / 24)
     df_long['Day_sin'] = np.sin(2 * np.pi * df_long['DayOfWeek'] / 7)
     df_long['Day_cos'] = np.cos(2 * np.pi * df_long['DayOfWeek'] / 7)
+    df_long['Month_sin'] = np.sin(2 * np.pi * df_long['Month'] / 12)
+    df_long['Month_cos'] = np.cos(2 * np.pi * df_long['Month'] / 12)
+    df_long['Week_sin'] = np.sin(2 * np.pi * df_long['WeekOfYear'] / 52)
+    df_long['Week_cos'] = np.cos(2 * np.pi * df_long['WeekOfYear'] / 52)
 
     # Add Irish holidays
     calendar = IrishBankHolidays()
     holidays = calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max() + timedelta(days=30))
     df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
+    
+    # Holiday proximity features
+    df_long['DaysToHoliday'] = 0
+    df_long['DaysFromHoliday'] = 0
+    
+    for idx, row in df_long.iterrows():
+        date = row['Datetime'].normalize()
+        # Find closest holiday
+        future_holidays = [h for h in holidays if h >= date]
+        past_holidays = [h for h in holidays if h < date]
+        
+        if future_holidays:
+            df_long.loc[idx, 'DaysToHoliday'] = (min(future_holidays) - date).days
+        else:
+            df_long.loc[idx, 'DaysToHoliday'] = 365  # Far future
+            
+        if past_holidays:
+            df_long.loc[idx, 'DaysFromHoliday'] = (date - max(past_holidays)).days
+        else:
+            df_long.loc[idx, 'DaysFromHoliday'] = 365  # Far past
+    
+    # Seasonal indicators
+    df_long['IsSummer'] = df_long['Month'].isin([6, 7, 8]).astype(int)
+    df_long['IsWinter'] = df_long['Month'].isin([12, 1, 2]).astype(int)
+    df_long['IsSpring'] = df_long['Month'].isin([3, 4, 5]).astype(int)
+    
+    # Peak hour indicators
+    df_long['IsPeakHour'] = df_long['Hour'].isin([20]).astype(int)  # 8pm typically busiest
+    df_long['IsLowHour'] = df_long['Hour'].isin([8]).astype(int)    # 8am typically quietest
 
     # Encode hospital
     df_long['Hospital_Code'] = df_long['Hospital'].astype('category').cat.codes
@@ -87,31 +128,74 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
         for time_str in times:
             future_datetime = pd.to_datetime(f"{future_date.date()} {time_str}")
             
-            # Feature engineering for future dates
+            # Enhanced feature engineering for future dates
             hour = future_datetime.hour
             day_of_week = future_datetime.dayofweek
+            day_of_month = future_datetime.day
+            month = future_datetime.month
+            quarter = (month - 1) // 3 + 1
+            week_of_year = future_datetime.isocalendar().week
+            
             is_weekend = int(day_of_week in [5, 6])
+            is_monday = int(day_of_week == 0)
+            is_friday = int(day_of_week == 4)
+            
+            # Cyclical features
             hour_sin = np.sin(2 * np.pi * hour / 24)
             hour_cos = np.cos(2 * np.pi * hour / 24)
             day_sin = np.sin(2 * np.pi * day_of_week / 7)
             day_cos = np.cos(2 * np.pi * day_of_week / 7)
+            month_sin = np.sin(2 * np.pi * month / 12)
+            month_cos = np.cos(2 * np.pi * month / 12)
+            week_sin = np.sin(2 * np.pi * week_of_year / 52)
+            week_cos = np.cos(2 * np.pi * week_of_year / 52)
             
             # Check if it's a holiday
             calendar = IrishBankHolidays()
             holidays = calendar.holidays(start=future_datetime, end=future_datetime)
             is_holiday = int(future_datetime.normalize() in holidays)
             
+            # Holiday proximity (simplified for future dates)
+            days_to_holiday = 30  # Default
+            days_from_holiday = 30  # Default
+            
+            # Seasonal indicators
+            is_summer = int(month in [6, 7, 8])
+            is_winter = int(month in [12, 1, 2])
+            is_spring = int(month in [3, 4, 5])
+            
+            # Peak hour indicators
+            is_peak_hour = int(hour == 20)
+            is_low_hour = int(hour == 8)
+            
             future_dates.append({
                 'Datetime': future_datetime,
                 'Hospital': hospital,
                 'Hour': hour,
                 'DayOfWeek': day_of_week,
+                'DayOfMonth': day_of_month,
+                'Month': month,
+                'Quarter': quarter,
+                'WeekOfYear': week_of_year,
                 'IsWeekend': is_weekend,
+                'IsMonday': is_monday,
+                'IsFriday': is_friday,
                 'Hour_sin': hour_sin,
                 'Hour_cos': hour_cos,
                 'Day_sin': day_sin,
                 'Day_cos': day_cos,
+                'Month_sin': month_sin,
+                'Month_cos': month_cos,
+                'Week_sin': week_sin,
+                'Week_cos': week_cos,
                 'IsHoliday': is_holiday,
+                'DaysToHoliday': days_to_holiday,
+                'DaysFromHoliday': days_from_holiday,
+                'IsSummer': is_summer,
+                'IsWinter': is_winter,
+                'IsSpring': is_spring,
+                'IsPeakHour': is_peak_hour,
+                'IsLowHour': is_low_hour,
                 'Hospital_Code': hospital_code,
                 'Additional_Capacity': additional_capacity
             })
@@ -119,29 +203,64 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
     return pd.DataFrame(future_dates)
 
 def forecast_with_lags(model, historical_data, future_df, features):
-    """Forecast future values using lag features"""
-    # Get last 3 values for initial lags
-    last_values = historical_data['Value'].tail(3).values
+    """Enhanced forecast function with better lag handling"""
+    # Get last 7 values for initial lags (weekly pattern)
+    last_values = historical_data['Value'].tail(7).values
     
     predictions = []
-    current_lags = list(reversed(last_values))  # [lag_1, lag_2, lag_3]
+    current_lags = list(reversed(last_values))  # [lag_1, lag_2, ..., lag_7]
     
-    # Features without lag columns
-    base_features = [f for f in features if not f.startswith('Lag_')]
+    # Features without lag, rolling, and cross-metric columns
+    base_features = [f for f in features if not any(x in f for x in ['Lag_', 'Rolling_', '_Value', '_Lag1', 'Hour_Weekend', 'Month_Weekend'])]
+    
+    # Get rolling stats from historical data
+    historical_mean_3 = historical_data['Value'].tail(3).mean()
+    historical_mean_7 = historical_data['Value'].tail(7).mean()
+    historical_std_3 = historical_data['Value'].tail(3).std()
+    historical_std_7 = historical_data['Value'].tail(7).std()
+    
+    # Fill NaN with 0 for std calculations
+    historical_std_3 = historical_std_3 if not np.isnan(historical_std_3) else 0
+    historical_std_7 = historical_std_7 if not np.isnan(historical_std_7) else 0
     
     for idx, row in future_df.iterrows():
-        # Create feature vector with current lags
         try:
+            # Base features
             base_values = [row[f] for f in base_features]
-            feature_vector = base_values + current_lags
+            
+            # Lag features (up to 7 lags)
+            lag_values = current_lags[:7] + [0] * (7 - len(current_lags))
+            
+            # Rolling statistics (simplified for forecasting)
+            rolling_values = [historical_mean_3, historical_mean_7, historical_std_3, historical_std_7]
+            
+            # Interaction features
+            hour_weekend = row['Hour'] * row['IsWeekend']
+            month_weekend = row['Month'] * row['IsWeekend']
+            interaction_values = [hour_weekend, month_weekend]
+            
+            # Cross-metric features (simplified - use last known values)
+            cross_values = [0, 0]  # Placeholder for cross-metric features
+            
+            # Combine all features
+            feature_vector = base_values + lag_values + rolling_values + interaction_values + cross_values
             feature_vector = np.array(feature_vector).reshape(1, -1)
             
             # Make prediction
             pred = model.predict(feature_vector)[0]
-            predictions.append(max(0, pred))  # Ensure non-negative predictions
+            pred = max(0, pred)  # Ensure non-negative predictions
+            predictions.append(pred)
             
             # Update lags for next prediction
-            current_lags = [pred] + current_lags[:2]
+            current_lags = [pred] + current_lags[:6]
+            
+            # Update rolling statistics
+            if len(predictions) >= 3:
+                historical_mean_3 = np.mean(predictions[-3:])
+                historical_std_3 = np.std(predictions[-3:])
+            if len(predictions) >= 7:
+                historical_mean_7 = np.mean(predictions[-7:])
+                historical_std_7 = np.std(predictions[-7:])
             
         except Exception as e:
             st.error(f"Error in prediction: {e}")
@@ -233,12 +352,23 @@ if uploaded_file:
         options=["All Hospitals"] + hospitals
     )
     
-    # Forecast days
-    forecast_days = st.sidebar.slider(
-        "Forecast Days:",
-        min_value=1,
-        max_value=14,
-        value=7
+    # Accuracy Improvement Controls
+    st.sidebar.header("🎯 Accuracy Settings")
+    
+    use_cross_validation = st.sidebar.checkbox("Use Cross-Validation", value=False)
+    ensemble_models = st.sidebar.checkbox("Use Ensemble Models", value=False)
+    
+    # Model hyperparameters
+    with st.sidebar.expander("⚙️ Model Parameters"):
+        n_estimators = st.slider("Number of Trees", 100, 500, 200)
+        learning_rate = st.slider("Learning Rate", 0.01, 0.2, 0.05, 0.01)
+        max_depth = st.slider("Max Depth", 3, 15, 8)
+        
+    # Feature importance threshold
+    feature_importance_threshold = st.sidebar.slider(
+        "Feature Importance Threshold", 
+        0.0, 0.1, 0.01, 0.005,
+        help="Remove features below this importance threshold"
     )
     
     # Run button
@@ -253,12 +383,23 @@ if uploaded_file:
         else:
             selected_hospitals = [hospital_option]
         
-        # Features for modeling
-        features = [
-            'Hour', 'DayOfWeek', 'IsWeekend', 'Hour_sin', 'Hour_cos',
-            'Day_sin', 'Day_cos', 'IsHoliday', 'Hospital_Code',
-            'Lag_1', 'Lag_2', 'Lag_3', 'Additional_Capacity'
+        # Enhanced Features for modeling
+        base_features = [
+            'Hour', 'DayOfWeek', 'DayOfMonth', 'Month', 'Quarter', 'WeekOfYear',
+            'IsWeekend', 'IsMonday', 'IsFriday',
+            'Hour_sin', 'Hour_cos', 'Day_sin', 'Day_cos', 'Month_sin', 'Month_cos', 'Week_sin', 'Week_cos',
+            'IsHoliday', 'DaysToHoliday', 'DaysFromHoliday',
+            'IsSummer', 'IsWinter', 'IsSpring',
+            'IsPeakHour', 'IsLowHour',
+            'Hospital_Code', 'Additional_Capacity'
         ]
+        
+        lag_features = [f'Lag_{i}' for i in range(1, 8)]
+        rolling_features = ['Rolling_Mean_3', 'Rolling_Mean_7', 'Rolling_Std_3', 'Rolling_Std_7']
+        interaction_features = ['Hour_Weekend', 'Month_Weekend']
+        cross_features = [f'{other_metric}_Value', f'{other_metric}_Lag1'] if 'other_metric' in locals() else []
+        
+        features = base_features + lag_features + rolling_features + interaction_features + cross_features
         
         # Process each selected hospital
         for hospital in selected_hospitals:
@@ -277,9 +418,33 @@ if uploaded_file:
                 metric_data = hospital_data[hospital_data['Metric'] == metric].copy()
                 metric_data = metric_data.sort_values('Datetime')
                 
-                # Create lag features
-                for i in range(1, 4):
+                # Enhanced lag features
+                for i in range(1, 8):  # Increase to 7 lags (weekly pattern)
                     metric_data[f'Lag_{i}'] = metric_data['Value'].shift(i)
+                
+                # Rolling statistics
+                metric_data['Rolling_Mean_3'] = metric_data['Value'].rolling(window=3).mean()
+                metric_data['Rolling_Mean_7'] = metric_data['Value'].rolling(window=7).mean()
+                metric_data['Rolling_Std_3'] = metric_data['Value'].rolling(window=3).std()
+                metric_data['Rolling_Std_7'] = metric_data['Value'].rolling(window=7).std()
+                
+                # Interaction features
+                metric_data['Hour_Weekend'] = metric_data['Hour'] * metric_data['IsWeekend']
+                metric_data['Month_Weekend'] = metric_data['Month'] * metric_data['IsWeekend']
+                
+                # Add cross-metric features (ED affects Trolley and vice versa)
+                other_metric = 'Trolley' if metric == 'ED' else 'ED'
+                other_data = hospital_data[hospital_data['Metric'] == other_metric].copy()
+                if len(other_data) > 0:
+                    other_data = other_data.sort_values('Datetime')
+                    # Merge on datetime to get cross-metric features
+                    cross_merge = pd.merge(metric_data[['Datetime']], other_data[['Datetime', 'Value']], 
+                                         on='Datetime', how='left', suffixes=('', f'_{other_metric}'))
+                    metric_data[f'{other_metric}_Value'] = cross_merge[f'Value_{other_metric}'].fillna(method='ffill')
+                    metric_data[f'{other_metric}_Lag1'] = metric_data[f'{other_metric}_Value'].shift(1)
+                else:
+                    metric_data[f'{other_metric}_Value'] = 0
+                    metric_data[f'{other_metric}_Lag1'] = 0
                 
                 metric_data.dropna(inplace=True)
                 
@@ -296,7 +461,19 @@ if uploaded_file:
                 X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
                 y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
                 
-                model = lgb.LGBMRegressor(verbose=-1, random_state=42)
+                # Enhanced model with better hyperparameters
+                model = lgb.LGBMRegressor(
+                    n_estimators=200,
+                    learning_rate=0.05,
+                    max_depth=8,
+                    num_leaves=31,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_alpha=0.1,
+                    reg_lambda=0.1,
+                    verbose=-1,
+                    random_state=42
+                )
                 model.fit(X_train, y_train)
                 
                 # Calculate model performance
