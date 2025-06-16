@@ -1,563 +1,546 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-import holidays
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit
+from nixtla import NixtlaClient
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
+import time
+from datetime import datetime, timedelta
 warnings.filterwarnings('ignore')
 
-# ------------- ENHANCED FEATURE ENGINEERING ---------------
+# ------------- TIMEGPT CONFIGURATION ---------------
 
-@st.cache_data
-def get_ireland_holidays(years):
-    ir_holidays = holidays.Ireland(years=years)
-    # Add custom Feb holiday for example (Feb 15)
-    for year in years:
-        ir_holidays[f'{year}-02-15'] = "Custom Feb Bank Holiday"
-    return ir_holidays
-
-@st.cache_data
-def create_advanced_features(df, metric, ir_holidays):
-    """Enhanced feature engineering with more sophisticated patterns"""
-    temp_df = df.copy()
-    temp_df['ds'] = pd.to_datetime(temp_df['Date'])
-    feature_df = temp_df[['ds', metric]].rename(columns={metric: 'y'}).dropna().set_index('ds')
-    
-    # Temporal features
-    feature_df['year'] = feature_df.index.year
-    feature_df['month'] = feature_df.index.month
-    feature_df['day'] = feature_df.index.day
-    feature_df['dayofweek'] = feature_df.index.dayofweek
-    feature_df['hour'] = feature_df.index.hour
-    feature_df['week_of_year'] = feature_df.index.isocalendar().week
-    feature_df['quarter'] = feature_df.index.quarter
-    feature_df['day_of_year'] = feature_df.index.dayofyear
-    
-    # Cyclical encoding (captures circular nature of time)
-    feature_df['hour_sin'] = np.sin(2 * np.pi * feature_df['hour'] / 24)
-    feature_df['hour_cos'] = np.cos(2 * np.pi * feature_df['hour'] / 24)
-    feature_df['dow_sin'] = np.sin(2 * np.pi * feature_df['dayofweek'] / 7)
-    feature_df['dow_cos'] = np.cos(2 * np.pi * feature_df['dayofweek'] / 7)
-    feature_df['month_sin'] = np.sin(2 * np.pi * feature_df['month'] / 12)
-    feature_df['month_cos'] = np.cos(2 * np.pi * feature_df['month'] / 12)
-    feature_df['quarter_sin'] = np.sin(2 * np.pi * feature_df['quarter'] / 4)
-    feature_df['quarter_cos'] = np.cos(2 * np.pi * feature_df['quarter'] / 4)
-    
-    # Advanced lag features
-    for lag in [1, 2, 3, 7, 14]:  # Various time horizons
-        feature_df[f'y_lag{lag}'] = feature_df['y'].shift(lag)
-    
-    # Rolling statistics (multiple windows)
-    for window in [3, 7, 14, 30]:
-        feature_df[f'y_rolling_mean_{window}'] = feature_df['y'].rolling(window, min_periods=1).mean()
-        feature_df[f'y_rolling_std_{window}'] = feature_df['y'].rolling(window, min_periods=1).std()
-        feature_df[f'y_rolling_max_{window}'] = feature_df['y'].rolling(window, min_periods=1).max()
-        feature_df[f'y_rolling_min_{window}'] = feature_df['y'].rolling(window, min_periods=1).min()
-        feature_df[f'y_rolling_median_{window}'] = feature_df['y'].rolling(window, min_periods=1).median()
-    
-    # Exponential moving averages
-    for alpha in [0.1, 0.3, 0.5]:
-        feature_df[f'y_ema_{alpha}'] = feature_df['y'].ewm(alpha=alpha).mean()
-    
-    # Percentage changes and volatility
-    feature_df['y_pct_change_1d'] = feature_df['y'].pct_change(1)
-    feature_df['y_pct_change_7d'] = feature_df['y'].pct_change(7)
-    feature_df['y_pct_change_30d'] = feature_df['y'].pct_change(30)
-    feature_df['y_volatility_7d'] = feature_df['y'].rolling(7, min_periods=1).std() / feature_df['y'].rolling(7, min_periods=1).mean()
-    feature_df['y_volatility_30d'] = feature_df['y'].rolling(30, min_periods=1).std() / feature_df['y'].rolling(30, min_periods=1).mean()
-    
-    # Holiday effects (more sophisticated)
-    holiday_dates = set(pd.to_datetime(list(ir_holidays.keys())).date)
-    
-    # Ensure we can extract dates from the index
-    if hasattr(feature_df.index, 'date'):
-        date_series = pd.Series(feature_df.index.date, index=feature_df.index)
-    else:
-        date_series = pd.Series([d.date() for d in feature_df.index], index=feature_df.index)
-    
-    feature_df['is_holiday'] = date_series.map(lambda x: 1 if x in holiday_dates else 0)
-    feature_df['days_since_holiday'] = 0
-    feature_df['days_until_holiday'] = 0
-    
-    # Calculate days to/from holidays
-    holiday_dates_dt = pd.to_datetime(list(holiday_dates))
-    for idx in feature_df.index:
-        past_holidays = holiday_dates_dt[holiday_dates_dt <= idx]
-        future_holidays = holiday_dates_dt[holiday_dates_dt > idx]
-        
-        if len(past_holidays) > 0:
-            feature_df.loc[idx, 'days_since_holiday'] = (idx - past_holidays.max()).days
-        if len(future_holidays) > 0:
-            feature_df.loc[idx, 'days_until_holiday'] = (future_holidays.min() - idx).days
-    
-    # Weekend/weekday patterns
-    feature_df['is_weekend'] = (feature_df['dayofweek'] >= 5).astype(int)
-    feature_df['is_monday'] = (feature_df['dayofweek'] == 0).astype(int)
-    feature_df['is_tuesday'] = (feature_df['dayofweek'] == 1).astype(int)
-    feature_df['is_wednesday'] = (feature_df['dayofweek'] == 2).astype(int)
-    feature_df['is_thursday'] = (feature_df['dayofweek'] == 3).astype(int)
-    feature_df['is_friday'] = (feature_df['dayofweek'] == 4).astype(int)
-    feature_df['is_saturday'] = (feature_df['dayofweek'] == 5).astype(int)
-    feature_df['is_sunday'] = (feature_df['dayofweek'] == 6).astype(int)
-    
-    # Seasonal patterns
-    feature_df['is_spring'] = feature_df['month'].isin([3, 4, 5]).astype(int)
-    feature_df['is_summer'] = feature_df['month'].isin([6, 7, 8]).astype(int)
-    feature_df['is_autumn'] = feature_df['month'].isin([9, 10, 11]).astype(int)
-    feature_df['is_winter'] = feature_df['month'].isin([12, 1, 2]).astype(int)
-    
-    # Time-based interactions
-    feature_df['weekend_evening'] = feature_df['is_weekend'] * (feature_df['hour'] >= 18).astype(int)
-    feature_df['monday_morning'] = feature_df['is_monday'] * (feature_df['hour'] <= 12).astype(int)
-    feature_df['friday_evening'] = feature_df['is_friday'] * (feature_df['hour'] >= 17).astype(int)
-    feature_df['weekend_night'] = feature_df['is_weekend'] * (feature_df['hour'] >= 22).astype(int)
-    
-    # Trend features
-    feature_df['trend'] = np.arange(len(feature_df))
-    feature_df['trend_squared'] = feature_df['trend'] ** 2
-    
-    # Clean up NaN values
-    feature_df = feature_df.replace([np.inf, -np.inf], np.nan)
-    
-    # Fill NaN values with appropriate strategies
-    numeric_cols = feature_df.select_dtypes(include=[np.number]).columns
-    for col in numeric_cols:
-        if col == 'y':
-            continue  # Don't fill target variable
-        if 'pct_change' in col or 'volatility' in col:
-            feature_df[col] = feature_df[col].fillna(0)
-        else:
-            feature_df[col] = feature_df[col].fillna(feature_df[col].median())
-    
-    return feature_df.reset_index()
-
-@st.cache_data
-def create_all_hospitals_features(df_raw, target_cols, ir_holidays):
-    """Create features using all hospitals data for better trend capture"""
-    # Aggregate all hospitals data
-    df_all = df_raw.groupby('Date')[target_cols].sum().reset_index()
-    
-    all_hospital_features = {}
-    for metric in target_cols:
-        if metric in df_all.columns:
-            # Create time series with hourly granularity
-            expanded_data = []
-            for _, row in df_all.iterrows():
-                for hour in [8, 14, 20]:
-                    expanded_data.append({
-                        'Date': row['Date'],
-                        'hour': hour,
-                        metric: row[metric]
-                    })
-            
-            expanded_df = pd.DataFrame(expanded_data)
-            expanded_df['ds'] = pd.to_datetime(expanded_df['Date'].astype(str) + ' ' + 
-                                            expanded_df['hour'].astype(str).str.zfill(2) + ':00:00')
-            
-            # Create features for this metric
-            temp_df = expanded_df[['ds', metric]].rename(columns={metric: 'y'}).set_index('ds')
-            
-            # Add system-wide trend features
-            temp_df['system_trend_7d'] = temp_df['y'].rolling(7*3, min_periods=1).mean()
-            temp_df['system_trend_30d'] = temp_df['y'].rolling(30*3, min_periods=1).mean()
-            temp_df['system_capacity_utilization'] = temp_df['y'] / temp_df['y'].rolling(90*3, min_periods=1).max()
-            temp_df['system_load_factor'] = temp_df['y'] / temp_df['y'].rolling(30*3, min_periods=1).mean()
-            
-            all_hospital_features[metric] = temp_df.reset_index()
-    
-    return all_hospital_features
-
-@st.cache_data
-def train_xgboost_model(feature_df, all_hospital_features, metric_name):
-    """Train XGBoost model with enhanced features and hyperparameter tuning"""
-    
-    # Enhanced feature list
-    base_features = ['year', 'month', 'day', 'dayofweek', 'hour', 'week_of_year', 'quarter', 'day_of_year']
-    cyclical_features = ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'month_sin', 'month_cos', 'quarter_sin', 'quarter_cos']
-    lag_features = [f'y_lag{i}' for i in [1, 2, 3, 7, 14]]
-    rolling_features = []
-    for window in [3, 7, 14, 30]:
-        rolling_features.extend([f'y_rolling_mean_{window}', f'y_rolling_std_{window}', 
-                               f'y_rolling_max_{window}', f'y_rolling_min_{window}', f'y_rolling_median_{window}'])
-    
-    ema_features = [f'y_ema_{alpha}' for alpha in [0.1, 0.3, 0.5]]
-    pct_features = ['y_pct_change_1d', 'y_pct_change_7d', 'y_pct_change_30d', 'y_volatility_7d', 'y_volatility_30d']
-    holiday_features = ['is_holiday', 'days_since_holiday', 'days_until_holiday']
-    pattern_features = ['is_weekend', 'is_monday', 'is_tuesday', 'is_wednesday', 'is_thursday', 'is_friday', 'is_saturday', 'is_sunday']
-    seasonal_features = ['is_spring', 'is_summer', 'is_autumn', 'is_winter']
-    interaction_features = ['weekend_evening', 'monday_morning', 'friday_evening', 'weekend_night']
-    trend_features = ['trend', 'trend_squared']
-    
-    all_features = (base_features + cyclical_features + lag_features + rolling_features + 
-                   ema_features + pct_features + holiday_features + pattern_features + 
-                   seasonal_features + interaction_features + trend_features)
-    
-    # Add system-wide features if available
-    if metric_name in all_hospital_features:
-        system_features = ['system_trend_7d', 'system_trend_30d', 'system_capacity_utilization', 'system_load_factor']
-        # Merge system features
-        system_df = all_hospital_features[metric_name]
-        feature_df = feature_df.merge(system_df[['ds'] + system_features], on='ds', how='left')
-        for col in system_features:
-            if col in feature_df.columns:
-                feature_df[col] = feature_df[col].fillna(feature_df[col].median())
-        all_features.extend(system_features)
-    
-    # Filter features that exist in the dataframe and have sufficient non-null values
-    available_features = []
-    for f in all_features:
-        if f in feature_df.columns:
-            non_null_ratio = feature_df[f].notna().sum() / len(feature_df)
-            if non_null_ratio > 0.7:  # Keep features with at least 70% non-null values
-                available_features.append(f)
-    
-    # Ensure we have enough data after cleaning
-    if len(feature_df) < 30:
-        raise ValueError(f"Insufficient data after cleaning: {len(feature_df)} rows")
-    
-    # Final data preparation
-    model_data = feature_df[['ds', 'y'] + available_features].copy()
-    model_data = model_data.dropna()
-    
-    if len(model_data) < 20:
-        raise ValueError("Too much data lost after removing NaN values")
-    
-    # Prepare features and target
-    X = model_data[available_features]
-    y = model_data['y']
-    
-    # Scale features for better performance
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Time series cross-validation for better model selection
-    tscv = TimeSeriesSplit(n_splits=3)
-    
-    # XGBoost with optimized hyperparameters for time series
-    xgb_model = xgb.XGBRegressor(
-        n_estimators=30,
-        max_depth=8,
-        learning_rate=0.08,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        random_state=42,
-        early_stopping_rounds=30,
-        n_jobs=-1
-    )
-    
-    # Split for validation (use last 20% for testing)
-    train_size = int(0.8 * len(X_scaled))
-    X_train, X_val = X_scaled[:train_size], X_scaled[train_size:]
-    y_train, y_val = y[:train_size], y[train_size:]
-    
-    # Train the model
-    xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-    
-    return xgb_model, scaler, available_features, model_data
-
-# ------------- ENHANCED EVALUATION AND FORECASTING ---------------
-
-def evaluate_and_forecast(xgb_model, scaler, features, model_data, forecast_periods=14):
-    """Enhanced model evaluation and future forecasting"""
-    
-    # Evaluation on test set
-    test_size = min(14, len(model_data) // 4)  # Use 25% of data or 14 days, whichever is smaller
-    
-    if test_size < 3:
-        test_size = max(1, len(model_data) // 10)  # Use at least 10% of data
-    
-    test_data = model_data.tail(test_size).copy()
-    
-    # Model evaluation
+def initialize_timegpt_client(api_key):
+    """Initialize TimeGPT client with API key"""
     try:
-        X_test = test_data[features].copy()
-        X_test = X_test.fillna(0)
-        X_test_scaled = scaler.transform(X_test)
-        y_true = test_data['y'].values
-        y_pred = xgb_model.predict(X_test_scaled)
+        client = NixtlaClient(api_key=api_key)
+        # Test the connection
+        client.validate_api_key()
+        return client
+    except Exception as e:
+        st.error(f"Failed to initialize TimeGPT client: {str(e)}")
+        return None
+
+def prepare_timegpt_data(df, metric_name, hospital_filter=None):
+    """Prepare data in TimeGPT format (ds, y columns)"""
+    try:
+        # Filter data if hospital is specified
+        if hospital_filter and hospital_filter != "All Hospitals":
+            df_filtered = df[df['Hospital'] == hospital_filter].copy()
+        else:
+            # Aggregate all hospitals
+            df_filtered = df.groupby('Date')[metric_name].sum().reset_index()
+            df_filtered.columns = ['Date', metric_name]
+        
+        # Prepare TimeGPT format
+        timegpt_df = pd.DataFrame({
+            'ds': pd.to_datetime(df_filtered['Date']),
+            'y': df_filtered[metric_name]
+        })
+        
+        # Remove NaN values and ensure proper sorting
+        timegpt_df = timegpt_df.dropna().sort_values('ds').reset_index(drop=True)
+        
+        # Ensure minimum data points
+        if len(timegpt_df) < 10:
+            raise ValueError(f"Insufficient data points: {len(timegpt_df)}")
+        
+        return timegpt_df
+    
+    except Exception as e:
+        st.error(f"Error preparing data for {metric_name}: {str(e)}")
+        return None
+
+def create_exogenous_features(df):
+    """Create exogenous variables for TimeGPT"""
+    try:
+        exog_df = df[['ds']].copy()
+        
+        # Temporal features
+        exog_df['year'] = exog_df['ds'].dt.year
+        exog_df['month'] = exog_df['ds'].dt.month
+        exog_df['day'] = exog_df['ds'].dt.day
+        exog_df['dayofweek'] = exog_df['ds'].dt.dayofweek
+        exog_df['quarter'] = exog_df['ds'].dt.quarter
+        exog_df['week_of_year'] = exog_df['ds'].dt.isocalendar().week
+        
+        # Cyclical encoding
+        exog_df['month_sin'] = np.sin(2 * np.pi * exog_df['month'] / 12)
+        exog_df['month_cos'] = np.cos(2 * np.pi * exog_df['month'] / 12)
+        exog_df['dow_sin'] = np.sin(2 * np.pi * exog_df['dayofweek'] / 7)
+        exog_df['dow_cos'] = np.cos(2 * np.pi * exog_df['dayofweek'] / 7)
+        exog_df['quarter_sin'] = np.sin(2 * np.pi * exog_df['quarter'] / 4)
+        exog_df['quarter_cos'] = np.cos(2 * np.pi * exog_df['quarter'] / 4)
+        
+        # Pattern features
+        exog_df['is_weekend'] = (exog_df['dayofweek'] >= 5).astype(int)
+        exog_df['is_monday'] = (exog_df['dayofweek'] == 0).astype(int)
+        exog_df['is_friday'] = (exog_df['dayofweek'] == 4).astype(int)
+        
+        # Seasonal patterns
+        exog_df['is_spring'] = exog_df['month'].isin([3, 4, 5]).astype(int)
+        exog_df['is_summer'] = exog_df['month'].isin([6, 7, 8]).astype(int)
+        exog_df['is_autumn'] = exog_df['month'].isin([9, 10, 11]).astype(int)
+        exog_df['is_winter'] = exog_df['month'].isin([12, 1, 2]).astype(int)
+        
+        # Trend
+        exog_df['trend'] = np.arange(len(exog_df))
+        
+        return exog_df
+    
+    except Exception as e:
+        st.error(f"Error creating exogenous features: {str(e)}")
+        return None
+
+def create_future_exogenous_features(last_date, forecast_periods):
+    """Create future exogenous variables for forecasting"""
+    try:
+        future_dates = pd.date_range(
+            start=last_date + timedelta(days=1),
+            periods=forecast_periods,
+            freq='D'
+        )
+        
+        future_exog = pd.DataFrame({'ds': future_dates})
+        
+        # Temporal features
+        future_exog['year'] = future_exog['ds'].dt.year
+        future_exog['month'] = future_exog['ds'].dt.month
+        future_exog['day'] = future_exog['ds'].dt.day
+        future_exog['dayofweek'] = future_exog['ds'].dt.dayofweek
+        future_exog['quarter'] = future_exog['ds'].dt.quarter
+        future_exog['week_of_year'] = future_exog['ds'].dt.isocalendar().week
+        
+        # Cyclical encoding
+        future_exog['month_sin'] = np.sin(2 * np.pi * future_exog['month'] / 12)
+        future_exog['month_cos'] = np.cos(2 * np.pi * future_exog['month'] / 12)
+        future_exog['dow_sin'] = np.sin(2 * np.pi * future_exog['dayofweek'] / 7)
+        future_exog['dow_cos'] = np.cos(2 * np.pi * future_exog['dayofweek'] / 7)
+        future_exog['quarter_sin'] = np.sin(2 * np.pi * future_exog['quarter'] / 4)
+        future_exog['quarter_cos'] = np.cos(2 * np.pi * future_exog['quarter'] / 4)
+        
+        # Pattern features
+        future_exog['is_weekend'] = (future_exog['dayofweek'] >= 5).astype(int)
+        future_exog['is_monday'] = (future_exog['dayofweek'] == 0).astype(int)
+        future_exog['is_friday'] = (future_exog['dayofweek'] == 4).astype(int)
+        
+        # Seasonal patterns
+        future_exog['is_spring'] = future_exog['month'].isin([3, 4, 5]).astype(int)
+        future_exog['is_summer'] = future_exog['month'].isin([6, 7, 8]).astype(int)
+        future_exog['is_autumn'] = future_exog['month'].isin([9, 10, 11]).astype(int)
+        future_exog['is_winter'] = future_exog['month'].isin([12, 1, 2]).astype(int)
+        
+        # Trend (continue from historical data)
+        future_exog['trend'] = np.arange(len(future_exog)) + 1000  # Offset to continue trend
+        
+        return future_exog
+    
+    except Exception as e:
+        st.error(f"Error creating future exogenous features: {str(e)}")
+        return None
+
+def run_timegpt_forecast(client, data_df, forecast_periods=14, use_exogenous=True, model='timegpt-1'):
+    """Run TimeGPT forecast with optional exogenous variables"""
+    try:
+        # Prepare exogenous variables if requested
+        exog_df = None
+        future_exog_df = None
+        
+        if use_exogenous:
+            exog_df = create_exogenous_features(data_df)
+            if exog_df is not None:
+                future_exog_df = create_future_exogenous_features(
+                    data_df['ds'].max(), 
+                    forecast_periods
+                )
+        
+        # Run forecast
+        forecast_result = client.forecast(
+            df=data_df,
+            h=forecast_periods,
+            X_df=exog_df,
+            X_future_df=future_exog_df,
+            model=model,
+            level=[50, 80, 90],  # Confidence intervals
+            freq='D'
+        )
+        
+        return forecast_result
+    
+    except Exception as e:
+        st.error(f"TimeGPT forecast error: {str(e)}")
+        return None
+
+def evaluate_timegpt_model(client, data_df, test_size=14, use_exogenous=True):
+    """Evaluate TimeGPT model using cross-validation"""
+    try:
+        # Ensure we have enough data for evaluation
+        if len(data_df) < test_size + 30:
+            test_size = max(7, len(data_df) // 4)
+        
+        # Prepare exogenous variables
+        exog_df = None
+        if use_exogenous:
+            exog_df = create_exogenous_features(data_df)
+        
+        # Run cross-validation
+        cv_results = client.cross_validation(
+            df=data_df,
+            h=test_size,
+            step_size=test_size // 2,
+            n_windows=3,
+            X_df=exog_df,
+            level=[50, 80, 90]
+        )
         
         # Calculate metrics
-        mae = mean_absolute_error(y_true, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        mape = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1))) * 100
+        mae = np.mean(np.abs(cv_results['y'] - cv_results['TimeGPT']))
+        rmse = np.sqrt(np.mean((cv_results['y'] - cv_results['TimeGPT']) ** 2))
+        mape = np.mean(np.abs((cv_results['y'] - cv_results['TimeGPT']) / np.maximum(cv_results['y'], 1))) * 100
         
-        metrics = {'MAE': mae, 'RMSE': rmse, 'MAPE': mape}
+        metrics = {
+            'MAE': mae,
+            'RMSE': rmse,
+            'MAPE': mape
+        }
         
-        # Generate future forecasts
-        last_data = model_data.iloc[-1].copy()
-        forecasts = []
-        forecast_dates = []
-        
-        current_date = pd.to_datetime(last_data['ds'])
-        
-        for i in range(forecast_periods):
-            # Create next time point
-            next_date = current_date + pd.Timedelta(days=1)
-            
-            # Create features for next time point
-            next_features = {}
-            
-            # Temporal features
-            next_features['year'] = next_date.year
-            next_features['month'] = next_date.month
-            next_features['day'] = next_date.day
-            next_features['dayofweek'] = next_date.dayofweek
-            next_features['hour'] = next_date.hour
-            next_features['week_of_year'] = next_date.isocalendar().week
-            next_features['quarter'] = next_date.quarter
-            next_features['day_of_year'] = next_date.dayofyear
-            
-            # Cyclical features
-            next_features['hour_sin'] = np.sin(2 * np.pi * next_features['hour'] / 24)
-            next_features['hour_cos'] = np.cos(2 * np.pi * next_features['hour'] / 24)
-            next_features['dow_sin'] = np.sin(2 * np.pi * next_features['dayofweek'] / 7)
-            next_features['dow_cos'] = np.cos(2 * np.pi * next_features['dayofweek'] / 7)
-            next_features['month_sin'] = np.sin(2 * np.pi * next_features['month'] / 12)
-            next_features['month_cos'] = np.cos(2 * np.pi * next_features['month'] / 12)
-            next_features['quarter_sin'] = np.sin(2 * np.pi * next_features['quarter'] / 4)
-            next_features['quarter_cos'] = np.cos(2 * np.pi * next_features['quarter'] / 4)
-            
-            # Use last available values for other features (simplified approach)
-            for feature in features:
-                if feature not in next_features:
-                    if feature in last_data:
-                        next_features[feature] = last_data[feature]
-                    else:
-                        next_features[feature] = 0
-            
-            # Make prediction
-            next_X = np.array([next_features[f] for f in features]).reshape(1, -1)
-            next_X_scaled = scaler.transform(next_X)
-            next_pred = xgb_model.predict(next_X_scaled)[0]
-            
-            forecasts.append(max(0, next_pred))  # Ensure non-negative predictions
-            forecast_dates.append(next_date)
-            current_date = next_date
-        
-        return metrics, forecasts, forecast_dates, y_true, y_pred, test_data['ds'].values
-        
+        return metrics, cv_results
+    
     except Exception as e:
-        st.warning(f"Error in model evaluation: {str(e)}")
-        return {'MAE': 0, 'RMSE': 0, 'MAPE': 0}, [], [], [], [], []
+        st.error(f"Model evaluation error: {str(e)}")
+        return None, None
 
-def create_forecast_plot(actual_dates, actual_values, pred_values, forecast_dates, forecast_values, metric_name):
-    """Create interactive forecast visualization"""
+def create_timegpt_plot(data_df, forecast_df, cv_results, metric_name):
+    """Create comprehensive TimeGPT visualization"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=[f'{metric_name} - Historical Data & Forecast', 'Cross-Validation Results'],
+        vertical_spacing=0.1,
+        row_heights=[0.7, 0.3]
+    )
     
-    fig = go.Figure()
+    # Historical data
+    fig.add_trace(
+        go.Scatter(
+            x=data_df['ds'], 
+            y=data_df['y'],
+            mode='lines',
+            name='Historical Data',
+            line=dict(color='blue', width=2)
+        ),
+        row=1, col=1
+    )
     
-    # Historical actual values
-    fig.add_trace(go.Scatter(
-        x=actual_dates,
-        y=actual_values,
-        mode='lines+markers',
-        name='Actual',
-        line=dict(color='blue', width=2),
-        marker=dict(size=4)
-    ))
+    # Forecast
+    if forecast_df is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=forecast_df['ds'],
+                y=forecast_df['TimeGPT'],
+                mode='lines+markers',
+                name='TimeGPT Forecast',
+                line=dict(color='red', width=2),
+                marker=dict(size=6)
+            ),
+            row=1, col=1
+        )
+        
+        # Confidence intervals
+        if 'TimeGPT-lo-90' in forecast_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=forecast_df['ds'],
+                    y=forecast_df['TimeGPT-hi-90'],
+                    mode='lines',
+                    line=dict(width=0),
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=forecast_df['ds'],
+                    y=forecast_df['TimeGPT-lo-90'],
+                    mode='lines',
+                    line=dict(width=0),
+                    fill='tonexty',
+                    fillcolor='rgba(255,0,0,0.2)',
+                    name='90% Confidence',
+                    showlegend=True
+                ),
+                row=1, col=1
+            )
     
-    # Predictions on test set
-    if len(pred_values) > 0:
-        fig.add_trace(go.Scatter(
-            x=actual_dates,
-            y=pred_values,
-            mode='lines+markers',
-            name='Predicted',
-            line=dict(color='red', width=2, dash='dash'),
-            marker=dict(size=4)
-        ))
-    
-    # Future forecasts
-    if len(forecast_values) > 0:
-        fig.add_trace(go.Scatter(
-            x=forecast_dates,
-            y=forecast_values,
-            mode='lines+markers',
-            name='Forecast',
-            line=dict(color='green', width=2),
-            marker=dict(size=6)
-        ))
+    # Cross-validation results
+    if cv_results is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=cv_results['ds'],
+                y=cv_results['y'],
+                mode='markers',
+                name='Actual (CV)',
+                marker=dict(color='blue', size=4)
+            ),
+            row=2, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=cv_results['ds'],
+                y=cv_results['TimeGPT'],
+                mode='markers',
+                name='Predicted (CV)',
+                marker=dict(color='red', size=4)
+            ),
+            row=2, col=1
+        )
     
     fig.update_layout(
-        title=f'{metric_name} - Forecast Results',
-        xaxis_title='Date',
-        yaxis_title='Value',
-        hovermode='x unified',
-        height=500
+        title=f'TimeGPT Analysis - {metric_name}',
+        height=800,
+        hovermode='x unified'
     )
+    
+    fig.update_xaxes(title_text="Date", row=2, col=1)
+    fig.update_yaxes(title_text="Value", row=1, col=1)
+    fig.update_yaxes(title_text="Value", row=2, col=1)
     
     return fig
 
-# ------------- MAIN APP ---------------
+# ------------- MAIN STREAMLIT APP ---------------
 
-st.set_page_config(layout="wide", page_title="Enhanced XGBoost ED Forecasting")
-st.title("🏥 Enhanced XGBoost Emergency Department Forecasting")
-st.markdown("*Simplified forecasting using advanced XGBoost with comprehensive feature engineering*")
+st.set_page_config(layout="wide", page_title="🤖 TimeGPT ED Forecasting")
+st.title("🤖 TimeGPT Emergency Department Forecasting")
+st.markdown("*Powered by Nixtla's TimeGPT Foundation Model*")
 
-st.sidebar.header("Upload & Settings")
+# API Configuration
+st.sidebar.header("🔑 TimeGPT API Configuration")
+api_key = st.sidebar.text_input(
+    "TimeGPT API Key", 
+    type="password",
+    help="Get your API key from https://dashboard.nixtla.io"
+)
+
+if not api_key:
+    st.sidebar.warning("Please enter your TimeGPT API key to continue")
+    st.info("To use this app, you'll need a TimeGPT API key from Nixtla. Visit https://dashboard.nixtla.io to get started.")
+    st.stop()
+
+# Initialize TimeGPT client
+with st.spinner("Initializing TimeGPT client..."):
+    client = initialize_timegpt_client(api_key)
+
+if not client:
+    st.stop()
+
+st.sidebar.success("✅ TimeGPT client initialized successfully!")
+
+# Model Configuration
+st.sidebar.header("🔧 Model Settings")
+model_choice = st.sidebar.selectbox(
+    "TimeGPT Model",
+    options=['timegpt-1', 'timegpt-1-long-horizon'],
+    help="Choose model variant"
+)
+
+use_exogenous = st.sidebar.checkbox(
+    "Use Exogenous Variables",
+    value=True,
+    help="Include temporal and seasonal features"
+)
+
+forecast_days = st.sidebar.slider(
+    "Forecast Horizon (days)",
+    min_value=7,
+    max_value=90,
+    value=14,
+    help="Number of days to forecast"
+)
+
+# File Upload
+st.sidebar.header("📁 Data Upload")
 uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=['xlsx', 'xls'])
 
 if uploaded_file:
-    df_raw = pd.read_excel(uploaded_file)
+    # Load data
+    with st.spinner("Loading data..."):
+        df_raw = pd.read_excel(uploaded_file)
+        
+        # Clean up data structure
+        if df_raw.shape[1] > 1:
+            df_raw = df_raw.iloc[:, 1:]
+        
+        if 'Date' not in df_raw.columns or 'Hospital' not in df_raw.columns:
+            st.sidebar.error("Excel must include 'Date' and 'Hospital' columns.")
+            st.stop()
+        
+        df_raw['Date'] = pd.to_datetime(df_raw['Date'])
     
-    # Data preprocessing
-    if df_raw.shape[1] > 1:
-        df_raw = df_raw.iloc[:, 1:]
-    
-    if 'Date' not in df_raw.columns or 'Hospital' not in df_raw.columns:
-        st.sidebar.error("Excel must include 'Date' and 'Hospital' columns.")
-        st.stop()
-    
-    df_raw['Date'] = pd.to_datetime(df_raw['Date'])
-    
-    # Metrics configuration
-    target_metrics_info = [
-        ('Tracker8am', '08:00:00'),
-        ('Tracker2pm', '14:00:00'),
-        ('Tracker8pm', '20:00:00'),
-        ('AdditionalCapacityOpenMorning', '08:00:00'),
-        ('TimeTotal_8am', '08:00:00'),
-        ('TimeTotal_2pm', '14:00:00'),
-        ('TimeTotal_8pm', '20:00:00'),
+    # Metric and Hospital Selection
+    target_metrics = [
+        'Tracker8am', 'Tracker2pm', 'Tracker8pm',
+        'AdditionalCapacityOpenMorning',
+        'TimeTotal_8am', 'TimeTotal_2pm', 'TimeTotal_8pm'
     ]
-    target_cols = [m[0] for m in target_metrics_info if m[0] in df_raw.columns]
     
+    available_metrics = [m for m in target_metrics if m in df_raw.columns]
     hospitals = ['All Hospitals'] + sorted(df_raw['Hospital'].unique())
+    
     selected_hospital = st.sidebar.selectbox("Select Hospital", hospitals)
+    selected_metrics = st.sidebar.multiselect(
+        "Select Metrics to Forecast",
+        available_metrics,
+        default=available_metrics[:3] if len(available_metrics) >= 3 else available_metrics
+    )
     
-    use_all_hospitals_trend = st.sidebar.checkbox("Use All Hospitals Trend", value=True, 
-                                                 help="Include system-wide trends for better forecasting")
-    
-    forecast_days = st.sidebar.slider("Forecast Days", min_value=7, max_value=30, value=14)
-    
-    if st.sidebar.button("🚀 Run XGBoost Forecast"):
-        # Get holidays
-        years = list(df_raw['Date'].dt.year.unique())
-        ir_holidays = holidays.Ireland(years=years)
+    if st.sidebar.button("🚀 Run TimeGPT Forecast", type="primary"):
+        if not selected_metrics:
+            st.error("Please select at least one metric to forecast.")
+            st.stop()
         
-        # Create all hospitals features if requested
-        all_hospital_features = {}
-        if use_all_hospitals_trend:
-            all_hospital_features = create_all_hospitals_features(df_raw, target_cols, ir_holidays)
+        start_time = time.time()
         
-        # Filter data
-        if selected_hospital == "All Hospitals":
-            df_filtered = df_raw.groupby('Date')[target_cols].sum().reset_index()
-        else:
-            df_filtered = df_raw[df_raw['Hospital'] == selected_hospital].copy()
+        st.header(f"🤖 TimeGPT Forecast Results for {selected_hospital}")
         
-        st.header(f"🎯 XGBoost Forecast Results for {selected_hospital}")
+        # Progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
         results_summary = []
+        total_metrics = len(selected_metrics)
         
-        for metric_name, time_suffix in target_metrics_info:
-            if metric_name not in df_filtered.columns:
-                continue
+        # Process each metric
+        for idx, metric_name in enumerate(selected_metrics):
+            progress_bar.progress((idx + 1) / total_metrics)
+            status_text.text(f"Processing {metric_name} with TimeGPT ({idx + 1}/{total_metrics})")
             
-            with st.expander(f"📊 {metric_name}", expanded=True):
+            with st.expander(f"🎯 {metric_name}", expanded=idx < 2):
                 try:
-                    # Create enhanced features
-                    feature_df = create_advanced_features(df_filtered, metric_name, ir_holidays)
+                    # Prepare data
+                    data_prep_start = time.time()
+                    timegpt_data = prepare_timegpt_data(df_raw, metric_name, selected_hospital)
                     
-                    if len(feature_df) < 50:
-                        st.warning(f"Insufficient data for {metric_name} (need at least 50 records)")
+                    if timegpt_data is None or len(timegpt_data) < 10:
+                        st.warning(f"Insufficient data for {metric_name}")
                         continue
                     
-                    # Train XGBoost model
-                    xgb_model, scaler, features, model_data = train_xgboost_model(
-                        feature_df, all_hospital_features, metric_name
-                    )
+                    data_prep_time = time.time() - data_prep_start
                     
-                    # Evaluate and forecast
-                    metrics, forecasts, forecast_dates, y_true, y_pred, test_dates = evaluate_and_forecast(
-                        xgb_model, scaler, features, model_data, forecast_days
+                    # Model evaluation
+                    eval_start = time.time()
+                    metrics, cv_results = evaluate_timegpt_model(
+                        client, timegpt_data, use_exogenous=use_exogenous
                     )
+                    eval_time = time.time() - eval_start
+                    
+                    # Forecasting
+                    forecast_start = time.time()
+                    forecast_result = run_timegpt_forecast(
+                        client, 
+                        timegpt_data, 
+                        forecast_periods=forecast_days,
+                        use_exogenous=use_exogenous,
+                        model=model_choice
+                    )
+                    forecast_time = time.time() - forecast_start
+                    
+                    if forecast_result is None:
+                        st.error(f"Failed to generate forecast for {metric_name}")
+                        continue
                     
                     # Display metrics
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("MAE", f"{metrics['MAE']:.2f}")
-                    with col2:
-                        st.metric("RMSE", f"{metrics['RMSE']:.2f}")
-                    with col3:
-                        st.metric("MAPE", f"{metrics['MAPE']:.1f}%")
-                    with col4:
-                        st.metric("Features Used", len(features))
+                    if metrics:
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        with col1:
+                            st.metric("MAE", f"{metrics['MAE']:.2f}")
+                        with col2:
+                            st.metric("RMSE", f"{metrics['RMSE']:.2f}")
+                        with col3:
+                            st.metric("MAPE", f"{metrics['MAPE']:.1f}%")
+                        with col4:
+                            st.metric("Model", model_choice)
+                        with col5:
+                            st.metric("Total Time", f"{data_prep_time + eval_time + forecast_time:.1f}s")
                     
-                    # Create and display forecast plot
-                    if len(forecasts) > 0:
-                        fig = create_forecast_plot(test_dates, y_true, y_pred, forecast_dates, forecasts, metric_name)
-                        st.plotly_chart(fig, use_container_width=True)
+                    # Visualization
+                    fig = create_timegpt_plot(timegpt_data, forecast_result, cv_results, metric_name)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Forecast table
+                    if len(forecast_result) > 0:
+                        display_columns = ['ds', 'TimeGPT']
+                        if 'TimeGPT-lo-90' in forecast_result.columns:
+                            display_columns.extend(['TimeGPT-lo-90', 'TimeGPT-hi-90'])
                         
-                        # Forecast summary
-                        forecast_df = pd.DataFrame({
-                            'Date': forecast_dates,
-                            'Forecast': forecasts
+                        forecast_display = forecast_result[display_columns].copy()
+                        forecast_display['ds'] = forecast_display['ds'].dt.strftime('%Y-%m-%d')
+                        forecast_display = forecast_display.round(2)
+                        
+                        st.subheader("📊 Forecast Table")
+                        st.dataframe(forecast_display, use_container_width=True)
+                        
+                        # Download button
+                        csv = forecast_display.to_csv(index=False)
+                        st.download_button(
+                            label=f"📥 Download {metric_name} Forecast",
+                            data=csv,
+                            file_name=f"{metric_name}_timegpt_forecast.csv",
+                            mime="text/csv"
+                        )
+                    
+                    # Store results
+                    if metrics:
+                        results_summary.append({
+                            'Metric': metric_name,
+                            'MAE': metrics['MAE'],
+                            'RMSE': metrics['RMSE'],
+                            'MAPE': metrics['MAPE'],
+                            'Model': model_choice,
+                            'Exogenous': use_exogenous,
+                            'Time_s': data_prep_time + eval_time + forecast_time
                         })
-                        st.subheader("📅 Forecast Summary")
-                        st.dataframe(forecast_df, use_container_width=True)
-                    
-                    # Feature importance
-                    if hasattr(xgb_model, 'feature_importances_'):
-                        importance_df = pd.DataFrame({
-                            'Feature': features,
-                            'Importance': xgb_model.feature_importances_
-                        }).sort_values('Importance', ascending=False).head(15)
-                        
-                        st.subheader("🔍 Top 15 Most Important Features")
-                        fig_importance = go.Figure(go.Bar(
-                            x=importance_df['Importance'],
-                            y=importance_df['Feature'],
-                            orientation='h'
-                        ))
-                        fig_importance.update_layout(height=500, yaxis={'categoryorder':'total ascending'})
-                        st.plotly_chart(fig_importance, use_container_width=True)
-                    
-                    # Add to summary
-                    results_summary.append({
-                        'Metric': metric_name,
-                        'MAE': metrics['MAE'],
-                        'RMSE': metrics['RMSE'],
-                        'MAPE': metrics['MAPE'],
-                        'Features': len(features)
-                    })
-                    
+                
                 except Exception as e:
                     st.error(f"Error processing {metric_name}: {str(e)}")
         
-        # Overall summary
+        # Summary
+        total_time = time.time() - start_time
+        progress_bar.progress(1.0)
+        status_text.text(f"✅ Completed all forecasts in {total_time:.1f} seconds")
+        
         if results_summary:
-            st.header("📋 Overall Results Summary")
+            st.subheader("📈 Results Summary")
             summary_df = pd.DataFrame(results_summary)
             st.dataframe(summary_df, use_container_width=True)
             
-            # Average performance metrics
-            col1, col2, col3 = st.columns(3)
+            # Overall metrics
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Average MAE", f"{summary_df['MAE'].mean():.2f}")
+                st.metric("Total Metrics", len(results_summary))
             with col2:
-                st.metric("Average RMSE", f"{summary_df['RMSE'].mean():.2f}")
+                st.metric("Avg MAPE", f"{summary_df['MAPE'].mean():.1f}%")
             with col3:
-                st.metric("Average MAPE", f"{summary_df['MAPE'].mean():.1f}%")
+                st.metric("Total Time", f"{total_time:.1f}s")
+            with col4:
+                st.metric("Avg Time/Metric", f"{total_time/len(results_summary):.1f}s")
 
 else:
-    st.info("📁 Please upload an Excel file to begin forecasting.")
-    st.markdown("""
-    ### 🔧 Features of this Enhanced XGBoost Forecasting System:
+    st.info("👆 Please upload an Excel file to begin forecasting with TimeGPT")
     
-    - **Advanced Feature Engineering**: 80+ engineered features including temporal patterns, lag variables, rolling statistics, and cyclical encodings
-    - **Holiday Integration**: Irish holiday calendar with custom holiday effects
-    - **System-wide Trends**: Option to include all-hospital trends for better forecasting
-    - **Time Series Validation**: Proper time series cross-validation for model evaluation
-    - **Interactive Visualizations**: Plotly-based charts for forecast analysis
-    - **Feature Importance**: Understand which factors drive your forecasts
-    - **Flexible Forecasting**: Choose forecast horizon from 7 to 30 days
-    
-    Simply upload your Excel file with 'Date' and 'Hospital' columns to get started!
-    """)
+    # Show sample data format
+    st.subheader("📋 Expected Data Format")
+    sample_data = pd.DataFrame({
+        'Date': pd.date_range('2024-01-01', periods=5),
+        'Hospital': ['Hospital A'] * 5,
+        'Tracker8am': [45, 52, 38, 41, 47],
+        'Tracker2pm': [62, 58, 71, 65, 59],
+        'Tracker8pm': [38, 42, 35, 39, 44]
+    })
+    st.dataframe(sample_data)
+
+# Footer
+st.markdown("---")
+st.markdown("**Powered by TimeGPT** - The first foundation model for time series forecasting")
+st.markdown("Learn more at [nixtla.io](https://nixtla.io)")
