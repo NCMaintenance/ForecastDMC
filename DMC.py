@@ -240,7 +240,7 @@ def forecast_with_lags(model, historical_data, future_df, features):
             interaction_values = [hour_weekend, month_weekend]
             
             # Cross-metric features (simplified - use last known values)
-            cross_values = [0, 0]  # Placeholder for cross-metric features
+            cross_values = [0, 0, 0, 0]  # Placeholder for cross-metric features
             
             # Combine all features
             feature_vector = base_values + lag_values + rolling_values + interaction_values + cross_values
@@ -446,21 +446,24 @@ if uploaded_file:
                     
                     if len(other_data) > 0:
                         other_data = other_data.sort_values('Datetime')
-                        # Merge on datetime to get cross-metric features
-                        cross_merge = pd.merge(
-                            metric_data[['Datetime']].reset_index(), 
-                            other_data[['Datetime', 'Value']].reset_index(drop=True), 
-                            on='Datetime', 
-                            how='left', 
-                            suffixes=('', '_other')
-                        )
                         
-                        # Check if the merge was successful and the column exists
-                        if 'Value_other' in cross_merge.columns:
-                            # Use forward fill and backward fill to handle missing values
-                            cross_merge['Value_other'] = cross_merge['Value_other'].fillna(method='ffill').fillna(method='bfill').fillna(0)
-                            metric_data[f'{other_metric}_Value'] = cross_merge.set_index('index')['Value_other']
+                        # Create a proper merge to get cross-metric features
+                        try:
+                            # Create a simpler alignment approach
+                            other_data_dict = dict(zip(other_data['Datetime'], other_data['Value']))
+                            
+                            # Map cross-metric values by datetime
+                            for idx, row in metric_data.iterrows():
+                                dt = row['Datetime']
+                                if dt in other_data_dict:
+                                    metric_data.loc[idx, f'{other_metric}_Value'] = other_data_dict[dt]
+                            
+                            # Create lag feature
                             metric_data[f'{other_metric}_Lag1'] = metric_data[f'{other_metric}_Value'].shift(1).fillna(0)
+                            
+                        except Exception as e:
+                            st.warning(f"Could not create cross-metric features for {metric} at {hospital}: {str(e)}")
+                            # Keep default values (0) that were already set
                     
                     # For compatibility, also add the cross-metric features for both ED and Trolley
                     if metric == 'ED':
@@ -602,25 +605,4 @@ else:
         - Historical ED and trolley wait data
         - Multiple hospitals (optional)
         - At least 30 days of historical data for accurate forecasting
-        - Daily records with 8am, 2pm, 8pm measurements
-        
-        **Example format:**
-        ```
-        Hospital Group Name | Hospital | Date | DayGAR | Tracker8am | Tracker2pm | Tracker8pm | TimeTotal_8am | TimeTotal_2pm | TimeTotal_8pm | AdditionalCapacityOpen Morning
-        HSE South/South West | Cork University Hospital | 2024-01-01 | Monday | 45 | 62 | 78 | 12 | 18 | 25 | 10
-        ```
         """)
-        
-    # Add footer with additional information
-    st.markdown("---")
-    st.markdown("""
-    **Features:**
-    - 🎯 Advanced machine learning with LightGBM
-    - 📊 Interactive forecasting charts
-    - 🇮🇪 Irish bank holiday integration
-    - 📈 Multiple hospitals support
-    - 💾 CSV export functionality
-    - 🔄 Cross-validation options
-    
-    **Built for Irish healthcare system ED forecasting**
-    """)
