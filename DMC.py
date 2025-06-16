@@ -267,8 +267,8 @@ if uploaded_file:
                 
                 # Use time-based split (last 20% for testing)
                 split_idx = int(len(X) * 0.8)
-                X_train, X_test = X[:split_idx], X[split_idx:]
-                y_train, y_test = y[:split_idx], y[split_idx:]
+                X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+                y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
                 
                 model = lgb.LGBMRegressor(verbose=-1, random_state=42)
                 model.fit(X_train, y_train)
@@ -276,6 +276,10 @@ if uploaded_file:
                 # Calculate model performance
                 y_pred_test = model.predict(X_test)
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+                
+                # Get test data for display (using the same indices)
+                test_data = metric_data.iloc[split_idx:].copy()
+                test_data['Predicted'] = y_pred_test
                 
                 # Create future dates
                 future_df = create_future_dates(
@@ -305,6 +309,13 @@ if uploaded_file:
                     hospital
                 )
                 st.plotly_chart(fig, use_container_width=True)
+                
+                # Show model validation results
+                with st.expander(f"📊 {metric} Model Validation"):
+                    validation_df = test_data[['Datetime', 'Hospital', 'Value', 'Predicted']].copy()
+                    validation_df['Error'] = validation_df['Value'] - validation_df['Predicted']
+                    validation_df['Abs_Error'] = abs(validation_df['Error'])
+                    st.dataframe(validation_df.head(10), use_container_width=True)
                 
                 # Show forecast table
                 with st.expander(f"📋 {metric} Forecast Details"):
