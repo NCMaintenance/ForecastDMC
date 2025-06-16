@@ -1,144 +1,116 @@
 import streamlit as st
 import pandas as pd
-from data_processor import process_data # Import the function from data_processor.py
-import plotly.express as px
+import numpy as np
+import lightgbm as lgb
+from datetime import datetime
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 
-# Page Configuration
-st.set_page_config(layout="wide", page_title="Hospital Data Analysis Platform")
+# --- Define Irish Bank Holidays ---
+class IrishBankHolidays(AbstractHolidayCalendar):
+    rules = [
+        Holiday("New Year's Day", month=1, day=1, observance=nearest_workday),
+        Holiday("St. Brigid's Day", month=2, day=1, observance=nearest_workday),
+        Holiday("St. Patrick's Day", month=3, day=17, observance=nearest_workday),
+        Holiday("Easter Monday", month=4, day=1, offset=pd.DateOffset(weekday=0)),  # Will adjust manually later
+        Holiday("May Day", month=5, day=1, offset=pd.DateOffset(weekday=0(1))),
+        Holiday("June Bank Holiday", month=6, day=1, offset=pd.DateOffset(weekday=0(1))),
+        Holiday("August Bank Holiday", month=8, day=1, offset=pd.DateOffset(weekday=0(1))),
+        Holiday("October Bank Holiday", month=10, day=1, offset=pd.DateOffset(weekday=0(-1))),
+        Holiday("Christmas Day", month=12, day=25),
+        Holiday("St. Stephen's Day", month=12, day=26),
+    ]
 
-st.title("🏥 Hospital Data Analysis Platform")
-st.markdown("Upload your Excel data, view transformations, and explore visualizations.")
+# --- Streamlit UI ---
+st.title("Emergency Department Forecasting (Ireland)")
+uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
 
-# --- File Uploader ---
-st.sidebar.header("1. Upload Your Data")
-uploaded_file = st.sidebar.file_uploader("Choose an Excel file", type=["xlsx", "xls"])
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
 
-# Initialize session state variables
-if 'processed_df' not in st.session_state:
-    st.session_state.processed_df = None
-if 'original_df_name' not in st.session_state:
-    st.session_state.original_df_name = ""
+    # Rename columns
+    df = df.rename(columns={
+        'Tracker8am': 'ED_8am',
+        'Tracker2pm': 'ED_2pm',
+        'Tracker8pm': 'ED_8pm',
+        'TimeTotal_8am': 'Trolley_8am',
+        'TimeTotal_2pm': 'Trolley_2pm',
+        'TimeTotal_8pm': 'Trolley_8pm',
+        'AdditionalCapacityOpen Morning': 'Additional_Capacity'
+    })
 
-if uploaded_file is not None:
-    try:
-        st.sidebar.success(f"File '{uploaded_file.name}' uploaded successfully!")
-        original_df = pd.read_excel(uploaded_file)
-        st.session_state.original_df_name = uploaded_file.name
+    # Forward-fill Additional Capacity across time points of the same day
+    df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
 
-        # Process data when file is uploaded or re-uploaded
-        with st.spinner("Processing data... This may take a moment."):
-            st.session_state.processed_df = process_data(original_df.copy()) # Use .copy()
+    # Reshape to long format
+    df_long = pd.melt(
+        df,
+        id_vars=['Hospital Group Name', 'Hospital', 'Date', 'DayGAR', 'Additional_Capacity'],
+        value_vars=['ED_8am', 'ED_2pm', 'ED_8pm', 'Trolley_8am', 'Trolley_2pm', 'Trolley_8pm'],
+        var_name='Metric_Time',
+        value_name='Value'
+    )
 
-        if st.session_state.processed_df is None or st.session_state.processed_df.empty:
-            st.error("Data processing failed or returned an empty DataFrame. Please check the console for errors from `data_processor.py` or ensure your data format is correct.")
-            # Keep the previous data if processing new upload fails, unless it's the first upload.
-            if st.session_state.original_df_name != uploaded_file.name : # if it's a new file that failed
-                 st.session_state.processed_df = None
-        else:
-            st.success("Data processed successfully!")
+    df_long[['Metric', 'TimeLabel']] = df_long['Metric_Time'].str.extract(r'(\w+)_([\d]+[ap]m)')
+    time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
+    df_long['TimeStr'] = df_long['TimeLabel'].map(time_map)
+    df_long['Datetime'] = pd.to_datetime(df_long['Date'].astype(str) + ' ' + df_long['TimeStr'])
 
-    except Exception as e:
-        st.error(f"An error occurred while reading or processing the file: {e}")
-        st.session_state.processed_df = None # Clear data on error
-else:
-    st.sidebar.info("Please upload an Excel file to begin analysis.")
+    # Feature engineering
+    df_long['Hour'] = df_long['Datetime'].dt.hour
+    df_long['DayOfWeek'] = df_long['Datetime'].dt.dayofweek
+    df_long['IsWeekend'] = df_long['DayOfWeek'].isin([5, 6]).astype(int)
+    df_long['Hour_sin'] = np.sin(2 * np.pi * df_long['Hour'] / 24)
+    df_long['Hour_cos'] = np.cos(2 * np.pi * df_long['Hour'] / 24)
+    df_long['Day_sin'] = np.sin(2 * np.pi * df_long['DayOfWeek'] / 7)
+    df_long['Day_cos'] = np.cos(2 * np.pi * df_long['DayOfWeek'] / 7)
 
-# --- Main Panel Display ---
-if st.session_state.processed_df is not None and not st.session_state.processed_df.empty:
-    st.header(f"Processed Data from: `{st.session_state.original_df_name}`")
+    # Add Irish holidays
+    calendar = IrishBankHolidays()
+    holidays = calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max())
+    df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
 
-    # --- Display Options ---
-    st.subheader("View Data")
-    show_raw_data = st.checkbox("Show full processed data table", False)
-    if show_raw_data:
-        st.dataframe(st.session_state.processed_df)
-    else:
-        st.dataframe(st.session_state.processed_df.head())
+    # Encode hospital as category
+    df_long['Hospital_Code'] = df_long['Hospital'].astype('category').cat.codes
 
-    st.subheader("Summary Statistics")
-    st.text("Overall summary statistics for the 'Value' column (includes ED and Trolley counts):")
-    st.dataframe(st.session_state.processed_df['Value'].describe())
+    # Filter for ED only
+    df_ed = df_long[df_long['Metric'] == 'ED']
 
-    st.markdown("---")
-    st.header("📊 Visualizations")
+    # Create lag features
+    df_ed = df_ed.sort_values(by=['Hospital', 'Datetime'])
+    df_ed['Lag_1'] = df_ed.groupby('Hospital')['Value'].shift(1)
+    df_ed['Lag_2'] = df_ed.groupby('Hospital')['Value'].shift(2)
+    df_ed['Lag_3'] = df_ed.groupby('Hospital')['Value'].shift(3)
 
-    # --- Filters for Visualization ---
-    st.sidebar.header("2. Visualization Filters")
+    # Drop rows with NA lag values
+    df_ed = df_ed.dropna()
 
-    # Get available filter options from the processed data
-    hospital_group_options = ['All'] + sorted(st.session_state.processed_df['Hospital Group Name'].unique().tolist())
-    selected_hospital_group = st.sidebar.selectbox("Select Hospital Group", hospital_group_options)
+    # Features and target
+    features = [
+        'Hour', 'DayOfWeek', 'IsWeekend', 'Hour_sin', 'Hour_cos',
+        'Day_sin', 'Day_cos', 'IsHoliday', 'Hospital_Code',
+        'Lag_1', 'Lag_2', 'Lag_3', 'Additional_Capacity'
+    ]
+    X = df_ed[features]
+    y = df_ed['Value']
 
-    if selected_hospital_group == 'All':
-        hospital_options_df = st.session_state.processed_df
-    else:
-        hospital_options_df = st.session_state.processed_df[st.session_state.processed_df['Hospital Group Name'] == selected_hospital_group]
+    # Train/test split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
 
-    hospital_options = ['All'] + sorted(hospital_options_df['Hospital'].unique().tolist())
-    selected_hospital = st.sidebar.selectbox("Select Hospital", hospital_options)
+    # Train LightGBM
+    model = lgb.LGBMRegressor()
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
 
-    metric_options = ['All'] + sorted(st.session_state.processed_df['Metric'].unique().tolist())
-    selected_metric = st.sidebar.selectbox("Select Metric (ED/Trolley)", metric_options)
+    # Show results
+    st.subheader("Model Performance")
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    st.write(f"RMSE: {rmse:.2f}")
 
-    time_label_options = ['All'] + sorted(st.session_state.processed_df['TimeLabel'].unique().tolist())
-    selected_time_label = st.sidebar.selectbox("Select Time Label (8am, 2pm, 8pm)", time_label_options)
-
-
-    # --- Apply Filters ---
-    filtered_df = st.session_state.processed_df.copy()
-    if selected_hospital_group != 'All':
-        filtered_df = filtered_df[filtered_df['Hospital Group Name'] == selected_hospital_group]
-    if selected_hospital != 'All':
-        filtered_df = filtered_df[filtered_df['Hospital'] == selected_hospital]
-    if selected_metric != 'All':
-        filtered_df = filtered_df[filtered_df['Metric'] == selected_metric]
-    if selected_time_label != 'All':
-        filtered_df = filtered_df[filtered_df['TimeLabel'] == selected_time_label]
-
-    # --- Line Chart ---
-    if not filtered_df.empty:
-        st.subheader("Values Over Time")
-        fig = px.line(
-            filtered_df,
-            x='Datetime',
-            y='Value',
-            color='Metric', # Color lines by Metric (ED/Trolley)
-            line_dash='TimeLabel', # Dash lines by TimeLabel (8am, 2pm, 8pm)
-            hover_name='Hospital',
-            labels={'Value': 'Count', 'Datetime': 'Date and Time'},
-            title=f"Counts for {selected_hospital if selected_hospital != 'All' else 'Selected Hospitals'} - {selected_metric if selected_metric != 'All' else 'All Metrics'}"
-        )
-        fig.update_layout(xaxis_title="Date and Time", yaxis_title="Value (Count)")
-        st.plotly_chart(fig, use_container_width=True)
-
-        # --- Chart for Lag and Rolling Features ---
-        if selected_metric != 'All' and selected_time_label != 'All' and selected_hospital != 'All': # Most granular view
-            st.subheader(f"Lag and Rolling Mean Analysis for {selected_hospital} - {selected_metric} at {selected_time_label}")
-
-            # Ensure no NaNs for plotting these specific features, or handle them
-            plot_df_enhanced = filtered_df[['Datetime', 'Value', 'Lag_1Day_Value', 'Rolling_Mean_7D_Value']].copy()
-            plot_df_enhanced = plot_df_enhanced.dropna(subset=['Lag_1Day_Value', 'Rolling_Mean_7D_Value'], how='all')
-
-            if not plot_df_enhanced.empty:
-                fig_enhanced = px.line(
-                    plot_df_enhanced.melt(id_vars=['Datetime'], var_name='Feature', value_name='Count'),
-                    x='Datetime',
-                    y='Count',
-                    color='Feature',
-                    title=f"Actual vs. Lag (1D) vs. Rolling Mean (7D) for {selected_hospital} - {selected_metric} - {selected_time_label}"
-                )
-                st.plotly_chart(fig_enhanced, use_container_width=True)
-            else:
-                st.warning("Not enough data to display lag/rolling mean chart for the current selection (requires at least 2 days for lag, and some data for rolling mean).")
-
-    elif st.session_state.processed_df is not None: # if processed_df exists but filtered_df is empty
-        st.warning("No data matches the current filter selection.")
-
-else:
-    if uploaded_file is not None: # If file was uploaded but processing failed
-        pass # Error message already shown
-    else: # Initial state, no file uploaded yet
-        st.info("Upload an Excel file using the sidebar to see the analysis.")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("Developed by AI Agent Jules.")
+    # Show predictions
+    df_ed_test = df_ed.iloc[y_test.index]
+    df_ed_test = df_ed_test.copy()
+    df_ed_test['Predicted'] = y_pred
+    st.subheader("Sample Predictions")
+    st.dataframe(df_ed_test[['Datetime', 'Hospital', 'Value', 'Predicted']].head(20))
