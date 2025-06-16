@@ -175,11 +175,28 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name):
     
     # Add vertical line to separate historical and forecast
     last_historical_date = historical_data['Datetime'].max()
-    fig.add_vline(
+    
+    # Convert timestamp to string to avoid plotly issues
+    fig.add_shape(
+        type="line",
+        x0=last_historical_date,
+        x1=last_historical_date,
+        y0=0,
+        y1=1,
+        yref="paper",
+        line=dict(color="gray", width=2, dash="dot"),
+    )
+    
+    # Add annotation for the line
+    fig.add_annotation(
         x=last_historical_date,
-        line_dash="dot",
-        line_color="gray",
-        annotation_text="Forecast Start"
+        y=0.95,
+        yref="paper",
+        text="Forecast Start",
+        showarrow=False,
+        bgcolor="white",
+        bordercolor="gray",
+        borderwidth=1
     )
     
     fig.update_layout(
