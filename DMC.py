@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import lightgbm as lgb
 from datetime import datetime, timedelta
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import TimeSeriesSplit # Import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
@@ -474,7 +474,6 @@ if uploaded_file:
             ]
 
             # Iterate through each selected hospital and metric ('ED Beds', 'Trolleys', 'Capacity')
-            # Now forecasting Capacity as well!
             for hospital in selected_hospitals:
                 st.subheader(f"🏥 {hospital}")
 
@@ -483,9 +482,6 @@ if uploaded_file:
 
                 # Extract hospital code and additional capacity (now 'Capacity') for future dates
                 hospital_code = hospital_data['Hospital_Code'].iloc[0] if not hospital_data.empty else 0
-                # For future Capacity prediction, we cannot use current 'Capacity' as a fixed value if we are forecasting it.
-                # However, for ED Beds and Trolleys, we still use the historical Capacity value as a feature.
-                # We'll handle this dynamically inside the loop for each target.
                 current_hospital_capacity_val = hospital_data['Capacity'].fillna(0).iloc[0] if not hospital_data.empty else 0
 
 
@@ -501,80 +497,84 @@ if uploaded_file:
 
                     st.info(f"Processing '{target_col_name}' for {hospital} ({hospital_data[target_col_name].count()} records)")
 
-                    # Create a copy of hospital_data for this specific target to avoid modifying it across targets
-                    # This is crucial for correct lag feature generation
                     metric_specific_data = hospital_data.copy()
 
                     # Add lag and rolling features specifically for the current target column
                     data_with_lags, lag_features = add_lag_features_smart(metric_specific_data, target_col_name)
 
                     # Determine features for this specific model
-                    # If the target is 'Capacity', we shouldn't use 'Capacity' as a feature to predict itself.
-                    # For 'ED Beds' and 'Trolleys', 'Capacity' is still a relevant feature.
-                    model_features = base_features[:] # Start with a copy of base features
+                    model_features = base_features[:]
                     if target_col_name != 'Capacity':
-                        model_features.append('Capacity') # Add Capacity as a feature if not forecasting Capacity itself
+                        model_features.append('Capacity')
 
-                    # Combine with lag features
                     all_features_for_model = model_features + lag_features
-
-                    # Filter available features to only include those present in the DataFrame and not the target itself
                     available_features = [f for f in all_features_for_model if f in data_with_lags.columns and f != target_col_name]
-
-                    # Prepare training data: drop rows with any missing values in features or target
                     training_data = data_with_lags.dropna(subset=[target_col_name] + available_features)
 
                     if len(training_data) < 5:
                         st.warning(f"⚠️ After preprocessing, insufficient data for '{target_col_name}' at {hospital} ({len(training_data)} records). Need at least 5 records to train a model.")
                         continue
 
-                    # Define X (features) and y (target) for model training
                     X = training_data[available_features]
                     y = training_data[target_col_name]
 
-                    # Split data into training and testing sets. For smaller datasets, use all data for training.
-                    if len(X) < 20:
-                        X_train, X_test = X, X.tail(min(3, len(X))) # Train on all, test on a small recent portion
-                        y_train, y_test = y, y.tail(min(3, len(y)))
-                    else:
-                        # For larger datasets, use a time-based split (80% train, 20% test)
-                        split_idx = int(len(X) * 0.8)
-                        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-                        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-                    # Initialize and train the LightGBM Regressor model
-                    # Hyperparameters can be fine-tuned here for better accuracy
+                    # Initialize LightGBM Regressor with hyperparameters for better accuracy
                     model = lgb.LGBMRegressor(
-                        n_estimators=min(400, len(X_train) * 2), # Adapt n_estimators to data size, consider increasing for more complex patterns
-                        learning_rate=0.1, # Slightly reduced learning rate can improve accuracy, try 0.01-0.1
-                        max_depth=min(8, len(available_features) // 2 + 1), # Increased max_depth for more complexity
-                        num_leaves=min(60, 2 ** min(8, len(available_features) // 2 + 1) - 1), # Increased num_leaves
-                        subsample=0.7, # Slightly reduced subsample to prevent overfitting
-                        colsample_bytree=0.7, # Slightly reduced colsample_bytree to prevent overfitting
-                        reg_alpha=0.1, # L1 regularization (try values like 0.1, 0.5, 1.0)
-                        reg_lambda=0.1, # L2 regularization (try values like 0.1, 0.5, 1.0)
-                        verbose=-1, # Suppress verbose output
+                        n_estimators=min(200, len(X) * 2), # Increased n_estimators, adjusted based on data size
+                        learning_rate=0.03, # Further reduced learning rate for potentially higher accuracy
+                        max_depth=min(10, len(available_features) + 1), # Increased max_depth, consider feature count
+                        num_leaves=min(100, 2 ** min(10, len(available_features) + 1) - 1), # Increased num_leaves
+                        subsample=0.7,
+                        colsample_bytree=0.7,
+                        reg_alpha=0.2, # Increased L1 regularization
+                        reg_lambda=0.2, # Increased L2 regularization
+                        verbose=-1,
                         random_state=42,
-                        force_col_wise=True # Optimize for column-wise data access
+                        force_col_wise=True
                     )
 
-                    try:
-                        model.fit(X_train, y_train)
+                    # --- Time Series Cross-Validation ---
+                    if len(X) >= 20: # Only perform CV if enough data for at least 3 splits
+                        tscv = TimeSeriesSplit(n_splits=min(5, len(X) // 10)) # Adjust n_splits dynamically
+                        fold_rmses = []
+                        for train_index, test_index in tscv.split(X):
+                            X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
+                            y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
-                        # Evaluate model performance on the test set
-                        y_pred_test = model.predict(X_test)
-                        rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+                            if len(X_train_fold) > 0 and len(X_test_fold) > 0:
+                                fold_model = lgb.LGBMRegressor(**model.get_params()) # Use same params for fold models
+                                fold_model.fit(X_train_fold, y_train_fold)
+                                y_pred_fold = fold_model.predict(X_test_fold)
+                                fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
+                            else:
+                                st.warning(f"Skipping a fold due to insufficient data for '{target_col_name}' at {hospital}.")
+
+                        if fold_rmses:
+                            avg_rmse = np.mean(fold_rmses)
+                            st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
+                        else:
+                            avg_rmse = np.nan
+                            st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
+                    else:
+                        st.info(f"Not enough data for cross-validation for '{target_col_name}'. Training on all available data.")
+                        # If not enough for CV, train on all data for the final forecast
+                        model.fit(X, y)
+                        y_pred_test = model.predict(X.tail(min(5,len(X)))) # Predict on last few for a basic RMSE
+                        rmse = np.sqrt(mean_squared_error(y.tail(min(5,len(y))), y_pred_test))
+                        avg_rmse = rmse # Report this as the RMSE if no CV
+
+                    try:
+                        # Train the final model on all available data for the most accurate future forecast
+                        model.fit(X, y)
 
                         # Create future timestamps for which to generate forecasts
                         future_df = create_future_dates(
                             pd.to_datetime(last_date),
                             hospital,
                             hospital_code,
-                            current_hospital_capacity_val, # Pass the historical capacity to future dates
+                            current_hospital_capacity_val, # This capacity is for creating features for other targets
                             days=forecast_days
                         )
-                        # If we are forecasting 'Capacity', the 'Capacity' column in future_df will be overwritten
-                        # by the prediction, which is fine. If not, it serves as a feature.
 
                         # Generate predictions for future dates using the trained model
                         predictions = forecast_with_lags(model, training_data, future_df, available_features, target_col_name)
@@ -583,11 +583,10 @@ if uploaded_file:
                         # Display key metrics using Streamlit columns
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric(f"{target_col_name} RMSE", f"{rmse:.2f}")
+                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}") # Display average CV RMSE
                         with col2:
-                            st.metric(f"Training Records", f"{len(X_train)}")
+                            st.metric(f"Training Records", f"{len(X)}")
                         with col3:
-                            # Display the last actual value of the target column
                             st.metric(f"Last {target_col_name} Value", f"{training_data[target_col_name].iloc[-1]:.0f}")
 
                         # Create and display the forecast plot
@@ -620,8 +619,8 @@ if uploaded_file:
                         )
 
                     except Exception as e:
-                        st.error(f"❌ Error training model or generating forecast for '{target_col_name}' at {hospital}: {str(e)}")
-                        st.info("This might be due to insufficient data for model training or data quality issues preventing proper feature engineering.")
+                        st.error(f"❌ Error during final model training or forecast generation for '{target_col_name}' at {hospital}: {str(e)}")
+                        st.info("This might be due to issues with the dataset or model training for future predictions.")
 
                     st.divider() # Separator for each metric's results
 
