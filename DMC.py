@@ -528,10 +528,10 @@ if uploaded_file:
 
                     # Initialize and train the LightGBM Regressor model
                     model = lgb.LGBMRegressor(
-                        n_estimators=min(1000, len(X_train) * 2), # Adapt n_estimators to data size
+                        n_estimators=min(100, len(X_train) * 2), # Adapt n_estimators to data size
                         learning_rate=0.1,
-                        max_depth=min(6, len(available_features) // 2 + 1), # Adapt max_depth
-                        num_leaves=min(40, 2 ** min(6, len(available_features) // 2 + 1) - 1), # Adapt num_leaves
+                        max_depth=min(4, len(available_features) // 2 + 1), # Adapt max_depth
+                        num_leaves=min(32, 2 ** min(6, len(available_features) // 2 + 1) - 1), # Adapt num_leaves
                         subsample=0.8,
                         colsample_bytree=0.8,
                         verbose=-1, # Suppress verbose output
