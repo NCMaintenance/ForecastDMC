@@ -523,7 +523,7 @@ def create_future_dates_enhanced(last_date, hospital, hospital_code, additional_
     return pd.DataFrame(future_dates)
 
 # --- Streamlit UI ---
-st.title("🇮🇪 Enhanced Emergency Department Forecasting (Ireland)")
+st.title("🏥 Enhanced Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file for comprehensive forecasting with capacity analysis")
 
 # Sidebar controls
