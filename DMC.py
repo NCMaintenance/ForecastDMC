@@ -143,6 +143,167 @@ def prepare_data_enhanced(df):
 
     return main_data
 
+def plot_forecasts_enhanced(historical_data, forecast_data, metric_name, hospital_name):
+    """Create enhanced interactive plotly chart with capacity information"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=(f'{metric_name} Forecast', 'Additional Capacity & Utilization'),
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        row_heights=[0.7, 0.3]
+    )
+    
+    # Historical data
+    fig.add_trace(go.Scatter(
+        x=historical_data['Datetime'],
+        y=historical_data['Value'],
+        mode='lines+markers',
+        name='Historical',
+        line=dict(color='blue'),
+        marker=dict(size=4)
+    ), row=1, col=1)
+    
+    # Forecast data
+    fig.add_trace(go.Scatter(
+        x=forecast_data['Datetime'],
+        y=forecast_data['Predicted'],
+        mode='lines+markers',
+        name='Forecast',
+        line=dict(color='red', dash='dash'),
+        marker=dict(size=6, symbol='diamond')
+    ), row=1, col=1)
+    
+    # Additional capacity
+    if 'Additional_Capacity' in historical_data.columns:
+        fig.add_trace(go.Scatter(
+            x=historical_data['Datetime'],
+            y=historical_data['Additional_Capacity'],
+            mode='lines',
+            name='Historical Capacity',
+            line=dict(color='green', width=2),
+            opacity=0.7
+        ), row=2, col=1)
+    
+    # Forecasted capacity
+    fig.add_trace(go.Scatter(
+        x=forecast_data['Datetime'],
+        y=forecast_data['Additional_Capacity'],
+        mode='lines',
+        name='Forecasted Capacity',
+        line=dict(color='green', dash='dot', width=2),
+        opacity=0.7
+    ), row=2, col=1)
+    
+    # Capacity utilization
+    if 'Total_to_Capacity_Ratio' in forecast_data.columns:
+        fig.add_trace(go.Scatter(
+            x=forecast_data['Datetime'],
+            y=forecast_data['Total_to_Capacity_Ratio'] * 100,
+            mode='lines+markers',
+            name='Capacity Utilization %',
+            line=dict(color='orange'),
+            yaxis='y3'
+        ), row=2, col=1)
+    
+    # Add vertical line
+    last_historical_date = historical_data['Datetime'].max()
+    fig.add_shape(
+        type="line",
+        x0=last_historical_date,
+        x1=last_historical_date,
+        y0=0, y1=1,
+        yref="paper",
+        line=dict(color="gray", width=2, dash="dot")
+    )
+    
+    fig.update_layout(
+        title=f'Enhanced {metric_name} Forecast - {hospital_name}',
+        height=700,
+        hovermode='x unified',
+        showlegend=True
+    )
+    
+    fig.update_xaxes(title_text="Date", row=2, col=1)
+    fig.update_yaxes(title_text=f'{metric_name} Count', row=1, col=1)
+    fig.update_yaxes(title_text='Additional Capacity', row=2, col=1)
+    
+    return fig
+def add_enhanced_forecasting_insights():
+    """Add enhanced insights section"""
+    with st.expander("💡 Enhanced Forecasting Insights & Tips", expanded=False):
+        st.subheader("🆕 New Capacity Features")
+        st.markdown("""
+        **Additional Capacity Handling:**
+        * **Forward Fill**: Assumes additional capacity stays open all day
+        * **Decay**: Reduces capacity throughout the day (100% → 80% → 60%)
+        * **Pattern-based**: Forecasts capacity based on historical patterns
+        
+        **Capacity Utilization Metrics:**
+        * **Utilization Ratio**: Total patients / Additional capacity
+        * **Over-capacity**: When patient load exceeds additional capacity
+        * **Capacity Pressure**: How many patients above capacity threshold
+        """)
+        
+        st.subheader("🔍 Cross-Metric Analysis")
+        st.markdown("""
+        * **ED ↔ Trolley Correlation**: Shows relationship between ED attendance and trolley waits
+        * **Concurrent Features**: ED predictions consider trolley levels and vice versa
+        * **Total Patient Load**: Combined ED + Trolley for capacity planning
+        """)
+        
+        st.subheader("📊 Enhanced Results")
+        st.markdown("""
+        * **Feature Importance**: Shows which factors most influence predictions
+        * **Capacity Forecasting**: Predicts both patient numbers AND capacity utilization
+        * **Time-series Visualization**: Shows capacity alongside patient forecasts
+        * **Utilization %**: Helps identify potential overcrowding periods
+        """)
+        
+        st.subheader("💡 Recommendations")
+        st.markdown("""
+        * **High Correlation (>0.7)**: Strong relationship between metrics - good for cross-prediction
+        * **Over-capacity Periods**: Plan additional resources when utilization >100%
+        * **Pattern Recognition**: Use day-of-week and seasonal patterns for capacity planning
+        * **Early Warning**: Monitor forecasted capacity pressure for proactive management
+        """)
+        
+        st.subheader("🎯 Key Performance Indicators")
+        st.markdown("""
+        * **Capacity Efficiency**: Aim for 70-85% utilization for optimal flow
+        * **Peak Time Management**: Monitor 8pm forecasts for evening surge planning
+        * **Weekend Preparation**: Use Friday forecasts to prepare for weekend demand
+        * **Holiday Impact**: Check holiday flags for special event planning
+        """)
+        
+        st.subheader("⚠️ Alert Thresholds")
+        st.markdown("""
+        * **🟡 Yellow Alert**: Capacity utilization >80% - Prepare additional resources
+        * **🟠 Orange Alert**: Capacity utilization >100% - Activate overflow protocols
+        * **🔴 Red Alert**: Capacity pressure >20 patients - Emergency escalation
+        * **📈 Trend Alert**: 3+ consecutive days of increasing utilization
+        """)
+        
+        st.subheader("📋 Action Items Based on Forecasts")
+        st.markdown("""
+        **High Utilization Forecast (>90%):**
+        * Increase staffing levels
+        * Prepare additional treatment areas
+        * Review discharge protocols
+        * Coordinate with other departments
+        
+        **Over-Capacity Forecast (>100%):**
+        * Activate surge capacity protocols
+        * Consider patient diversions
+        * Alert senior management
+        * Prepare overflow areas
+        
+        **Low Utilization Forecast (<50%):**
+        * Optimize staff scheduling
+        * Plan maintenance activities
+        * Consider resource reallocation
+        * Schedule elective procedures
+        """)
+        
 def add_capacity_features(df):
     """Add capacity-related features and cross-metric relationships"""
     df = df.copy()
