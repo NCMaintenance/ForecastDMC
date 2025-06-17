@@ -546,7 +546,7 @@ if uploaded_file:
                     # Hyperparameters can be fine-tuned here for better accuracy
                     model = lgb.LGBMRegressor(
                         n_estimators=min(100, len(X_train) * 2), # Adapt n_estimators to data size, consider increasing for more complex patterns
-                        learning_rate=0.05, # Slightly reduced learning rate can improve accuracy, try 0.01-0.1
+                        learning_rate=0.1, # Slightly reduced learning rate can improve accuracy, try 0.01-0.1
                         max_depth=min(8, len(available_features) // 2 + 1), # Increased max_depth for more complexity
                         num_leaves=min(60, 2 ** min(8, len(available_features) // 2 + 1) - 1), # Increased num_leaves
                         subsample=0.7, # Slightly reduced subsample to prevent overfitting
