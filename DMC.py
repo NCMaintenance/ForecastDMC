@@ -351,7 +351,7 @@ def add_forecasting_insights():
         st.info("Forecasting is about identifying patterns in historical data to predict the future. The more consistent the patterns and the better they are represented by features, the more accurate the forecast is likely to be. However, unexpected events can always affect outcomes.")
 
 # --- Streamlit UI ---
-st.title("🇮🇪 Emergency Department Forecasting (Ireland)")
+st.title("Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts")
 
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
