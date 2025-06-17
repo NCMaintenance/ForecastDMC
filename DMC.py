@@ -521,9 +521,9 @@ if uploaded_file:
                     # Initialize LightGBM Regressor with hyperparameters for better accuracy
                     model = lgb.LGBMRegressor(
                         n_estimators=min(200, len(X) * 2), # Increased n_estimators, adjusted based on data size
-                        learning_rate=0.03, # Further reduced learning rate for potentially higher accuracy
-                        max_depth=min(10, len(available_features) + 1), # Increased max_depth, consider feature count
-                        num_leaves=min(100, 2 ** min(10, len(available_features) + 1) - 1), # Increased num_leaves
+                        learning_rate=0.1, # Further reduced learning rate for potentially higher accuracy
+                        max_depth=min(6, len(available_features) + 1), # Increased max_depth, consider feature count
+                        num_leaves=min(40, 2 ** min(10, len(available_features) + 1) - 1), # Increased num_leaves
                         subsample=0.7,
                         colsample_bytree=0.7,
                         reg_alpha=0.2, # Increased L1 regularization
