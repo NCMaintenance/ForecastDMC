@@ -588,7 +588,7 @@ if uploaded_file:
                 }
                 st.session_state.training_in_progress = False
                 st.session_state.training_completed = True
-                st.experimental_rerun()
+                st.rerun()
 
         if 'training_completed' in st.session_state and st.session_state.training_completed:
             st.markdown("#### Training Evaluation Metrics (Validation Set)")
@@ -602,7 +602,7 @@ if uploaded_file:
             if st.button("Clear Training Results", key="clear_training_results"):
                 st.session_state.training_completed = False
                 st.session_state.metrics_calculated = {}
-                st.experimental_rerun()
+                st.rerun()
 
     # Run button (Forecasting)
     # Ensure this is outside the training expander
