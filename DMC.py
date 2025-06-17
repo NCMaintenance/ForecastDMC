@@ -53,7 +53,7 @@ def prepare_data(df):
         value_name='Value'
     )
 
-    st.dataframe(df_long)
+    
 
     df_long[['Metric', 'TimeLabel']] = df_long['Metric_Time'].str.extract(r'(\w+)_([\d]+[ap]m)')
     time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
@@ -89,7 +89,7 @@ def prepare_data(df):
     # Holiday proximity features
     df_long['DaysToHoliday'] = 0
     df_long['DaysFromHoliday'] = 0
-    
+    st.dataframe(df_long)
     for idx, row in df_long.iterrows():
         date = row['Datetime'].normalize()
         # Find closest holiday
