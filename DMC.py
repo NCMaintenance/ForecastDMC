@@ -459,7 +459,7 @@ if uploaded_file:
                     
                     # Simple model configuration for small datasets
                     model = lgb.LGBMRegressor(
-                        n_estimators=min(500, len(X_train) * 2),  # Adapt to data size was 100.......................................................................
+                        n_estimators=min(5000, len(X_train) * 2),  # Adapt to data size was 100.......................................................................
                         learning_rate=0.1,
                         max_depth=min(6, len(available_features) // 2 + 1),
                         num_leaves=min(31, 2 ** min(6, len(available_features) // 2 + 1) - 1),
