@@ -393,7 +393,7 @@ def add_forecasting_insights():
         """)
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting (Ireland)")
+st.title("Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts")
 
 # Add forecast days control
