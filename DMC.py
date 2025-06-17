@@ -349,7 +349,7 @@ def add_forecasting_insights():
         """)
 
 # --- Streamlit UI ---
-st.title("🇮🇪 Emergency Department Forecasting (Ireland)")
+st.title("Emergency Department Forecasting (Ireland)")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts")
 
 # Add forecast days control
@@ -459,7 +459,7 @@ if uploaded_file:
                     
                     # Simple model configuration for small datasets
                     model = lgb.LGBMRegressor(
-                        n_estimators=min(325, len(X_train) * 2),  # Adapt to data size was 100.......................................................................
+                        n_estimators=min(100, len(X_train) * 2),  # Adapt to data size was 100.......................................................................
                         learning_rate=0.1,
                         max_depth=min(6, len(available_features) // 2 + 1),
                         num_leaves=min(31, 2 ** min(6, len(available_features) // 2 + 1) - 1),
