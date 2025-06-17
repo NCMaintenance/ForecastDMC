@@ -29,7 +29,7 @@ class IrishBankHolidays(AbstractHolidayCalendar):
     ]
 
 def prepare_data(df):
-    """Prepare and feature engineer the data"""
+    """Prepare and feature engineer the data with improved handling"""
     # Rename columns
     df = df.rename(columns={
         'Tracker8am': 'ED_8am',
@@ -43,6 +43,7 @@ def prepare_data(df):
 
     # Fill Additional Capacity across the day
     df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
+    df['Additional_Capacity'] = df['Additional_Capacity'].fillna(0)
 
     # Reshape to long format
     df_long = pd.melt(
@@ -53,12 +54,17 @@ def prepare_data(df):
         value_name='Value'
     )
 
+    # Clean and handle missing values early
+    df_long = df_long.dropna(subset=['Value'])
+    df_long['Value'] = pd.to_numeric(df_long['Value'], errors='coerce')
+    df_long = df_long.dropna(subset=['Value'])
+
     df_long[['Metric', 'TimeLabel']] = df_long['Metric_Time'].str.extract(r'(\w+)_([\d]+[ap]m)')
     time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
     df_long['TimeStr'] = df_long['TimeLabel'].map(time_map)
     df_long['Datetime'] = pd.to_datetime(df_long['Date'].astype(str) + ' ' + df_long['TimeStr'])
 
-    # Enhanced Feature Engineering
+    # Basic time features
     df_long['Hour'] = df_long['Datetime'].dt.hour
     df_long['DayOfWeek'] = df_long['Datetime'].dt.dayofweek
     df_long['DayOfMonth'] = df_long['Datetime'].dt.day
@@ -66,8 +72,8 @@ def prepare_data(df):
     df_long['Quarter'] = df_long['Datetime'].dt.quarter
     df_long['WeekOfYear'] = df_long['Datetime'].dt.isocalendar().week
     df_long['IsWeekend'] = df_long['DayOfWeek'].isin([5, 6]).astype(int)
-    df_long['IsMonday'] = (df_long['DayOfWeek'] == 0).astype(int)  # Monday effect
-    df_long['IsFriday'] = (df_long['DayOfWeek'] == 4).astype(int)  # Friday effect
+    df_long['IsMonday'] = (df_long['DayOfWeek'] == 0).astype(int)
+    df_long['IsFriday'] = (df_long['DayOfWeek'] == 4).astype(int)
     
     # Cyclical encoding for time features
     df_long['Hour_sin'] = np.sin(2 * np.pi * df_long['Hour'] / 24)
@@ -76,47 +82,61 @@ def prepare_data(df):
     df_long['Day_cos'] = np.cos(2 * np.pi * df_long['DayOfWeek'] / 7)
     df_long['Month_sin'] = np.sin(2 * np.pi * df_long['Month'] / 12)
     df_long['Month_cos'] = np.cos(2 * np.pi * df_long['Month'] / 12)
-    df_long['Week_sin'] = np.sin(2 * np.pi * df_long['WeekOfYear'] / 52)
-    df_long['Week_cos'] = np.cos(2 * np.pi * df_long['WeekOfYear'] / 52)
 
     # Add Irish holidays
     calendar = IrishBankHolidays()
-    holidays = calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max() + timedelta(days=30))
-    df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
-    
-    # Holiday proximity features
-    df_long['DaysToHoliday'] = 0
-    df_long['DaysFromHoliday'] = 0
-    
-    for idx, row in df_long.iterrows():
-        date = row['Datetime'].normalize()
-        # Find closest holiday
-        future_holidays = [h for h in holidays if h >= date]
-        past_holidays = [h for h in holidays if h < date]
-        
-        if future_holidays:
-            df_long.loc[idx, 'DaysToHoliday'] = (min(future_holidays) - date).days
-        else:
-            df_long.loc[idx, 'DaysToHoliday'] = 365  # Far future
-            
-        if past_holidays:
-            df_long.loc[idx, 'DaysFromHoliday'] = (date - max(past_holidays)).days
-        else:
-            df_long.loc[idx, 'DaysFromHoliday'] = 365  # Far past
-    
+    try:
+        holidays = calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max() + timedelta(days=30))
+        df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
+    except:
+        df_long['IsHoliday'] = 0
+
     # Seasonal indicators
     df_long['IsSummer'] = df_long['Month'].isin([6, 7, 8]).astype(int)
     df_long['IsWinter'] = df_long['Month'].isin([12, 1, 2]).astype(int)
-    df_long['IsSpring'] = df_long['Month'].isin([3, 4, 5]).astype(int)
     
     # Peak hour indicators
-    df_long['IsPeakHour'] = df_long['Hour'].isin([20]).astype(int)  # 8pm typically busiest
-    df_long['IsLowHour'] = df_long['Hour'].isin([8]).astype(int)    # 8am typically quietest
+    df_long['IsPeakHour'] = df_long['Hour'].isin([20]).astype(int)
+    df_long['IsLowHour'] = df_long['Hour'].isin([8]).astype(int)
 
     # Encode hospital
     df_long['Hospital_Code'] = df_long['Hospital'].astype('category').cat.codes
 
     return df_long
+
+def add_lag_features_smart(df, min_data_threshold=20):
+    """Add lag features intelligently based on available data"""
+    df = df.copy()
+    
+    # Determine maximum safe lag based on data size
+    max_safe_lag = min(7, len(df) // 4)  # Use at most 1/4 of data for lags
+    
+    if max_safe_lag < 1:
+        st.warning(f"Very limited data ({len(df)} records). Using minimal features.")
+        return df, []
+    
+    lag_features = []
+    
+    # Add lag features progressively
+    for i in range(1, max_safe_lag + 1):
+        lag_col = f'Lag_{i}'
+        df[lag_col] = df['Value'].shift(i)
+        lag_features.append(lag_col)
+    
+    # Add rolling features if we have enough data
+    if len(df) >= 6:
+        df['Rolling_Mean_3'] = df['Value'].rolling(window=min(3, len(df)//2), min_periods=1).mean()
+        lag_features.append('Rolling_Mean_3')
+        
+        if len(df) >= 14:
+            df['Rolling_Mean_7'] = df['Value'].rolling(window=min(7, len(df)//2), min_periods=1).mean()
+            lag_features.append('Rolling_Mean_7')
+    
+    # Fill NaN values with forward fill, then backward fill, then 0
+    for feature in lag_features:
+        df[feature] = df[feature].fillna(method='ffill').fillna(method='bfill').fillna(0)
+    
+    return df, lag_features
 
 def create_future_dates(last_date, hospital, hospital_code, additional_capacity, days=7):
     """Create future dates for forecasting"""
@@ -128,7 +148,7 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
         for time_str in times:
             future_datetime = pd.to_datetime(f"{future_date.date()} {time_str}")
             
-            # Enhanced feature engineering for future dates
+            # Basic features
             hour = future_datetime.hour
             day_of_week = future_datetime.dayofweek
             day_of_month = future_datetime.day
@@ -147,22 +167,19 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
             day_cos = np.cos(2 * np.pi * day_of_week / 7)
             month_sin = np.sin(2 * np.pi * month / 12)
             month_cos = np.cos(2 * np.pi * month / 12)
-            week_sin = np.sin(2 * np.pi * week_of_year / 52)
-            week_cos = np.cos(2 * np.pi * week_of_year / 52)
             
-            # Check if it's a holiday
-            calendar = IrishBankHolidays()
-            holidays = calendar.holidays(start=future_datetime, end=future_datetime)
-            is_holiday = int(future_datetime.normalize() in holidays)
-            
-            # Holiday proximity (simplified for future dates)
-            days_to_holiday = 30  # Default
-            days_from_holiday = 30  # Default
+            # Holiday check
+            is_holiday = 0
+            try:
+                calendar = IrishBankHolidays()
+                holidays = calendar.holidays(start=future_datetime, end=future_datetime)
+                is_holiday = int(future_datetime.normalize() in holidays)
+            except:
+                pass
             
             # Seasonal indicators
             is_summer = int(month in [6, 7, 8])
             is_winter = int(month in [12, 1, 2])
-            is_spring = int(month in [3, 4, 5])
             
             # Peak hour indicators
             is_peak_hour = int(hour == 20)
@@ -186,14 +203,9 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
                 'Day_cos': day_cos,
                 'Month_sin': month_sin,
                 'Month_cos': month_cos,
-                'Week_sin': week_sin,
-                'Week_cos': week_cos,
                 'IsHoliday': is_holiday,
-                'DaysToHoliday': days_to_holiday,
-                'DaysFromHoliday': days_from_holiday,
                 'IsSummer': is_summer,
                 'IsWinter': is_winter,
-                'IsSpring': is_spring,
                 'IsPeakHour': is_peak_hour,
                 'IsLowHour': is_low_hour,
                 'Hospital_Code': hospital_code,
@@ -204,51 +216,44 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
 
 def forecast_with_lags(model, historical_data, future_df, features):
     """Enhanced forecast function with better lag handling"""
-    # Get last 7 values for initial lags (weekly pattern)
+    # Get last values for initial lags
     last_values = historical_data['Value'].tail(7).values
     
     predictions = []
-    current_lags = list(reversed(last_values))  # [lag_1, lag_2, ..., lag_7]
+    current_lags = list(reversed(last_values))  # Most recent first
     
-    # Features without lag, rolling, and cross-metric columns
-    base_features = [f for f in features if not any(x in f for x in ['Lag_', 'Rolling_', '_Value', '_Lag1', 'Hour_Weekend', 'Month_Weekend'])]
-    
-    # Get rolling stats from historical data
+    # Calculate rolling statistics from historical data
     historical_mean_3 = historical_data['Value'].tail(3).mean()
     historical_mean_7 = historical_data['Value'].tail(7).mean()
-    historical_std_3 = historical_data['Value'].tail(3).std()
-    historical_std_7 = historical_data['Value'].tail(7).std()
-    
-    # Fill NaN with 0 for std calculations
-    historical_std_3 = historical_std_3 if not np.isnan(historical_std_3) else 0
-    historical_std_7 = historical_std_7 if not np.isnan(historical_std_7) else 0
     
     for idx, row in future_df.iterrows():
         try:
-            # Base features
-            base_values = [row[f] for f in base_features]
+            # Start with base features
+            feature_values = []
             
-            # Lag features (up to 7 lags)
-            lag_values = current_lags[:7] + [0] * (7 - len(current_lags))
-            
-            # Rolling statistics (simplified for forecasting)
-            rolling_values = [historical_mean_3, historical_mean_7, historical_std_3, historical_std_7]
-            
-            # Interaction features
-            hour_weekend = row['Hour'] * row['IsWeekend']
-            month_weekend = row['Month'] * row['IsWeekend']
-            interaction_values = [hour_weekend, month_weekend]
-            
-            # Cross-metric features (simplified - use last known values)
-            cross_values = [0, 0]  # Placeholder for cross-metric features
-            
-            # Combine all features
-            feature_vector = base_values + lag_values + rolling_values + interaction_values + cross_values
-            feature_vector = np.array(feature_vector).reshape(1, -1)
+            for feature in features:
+                if feature.startswith('Lag_'):
+                    # Handle lag features
+                    lag_num = int(feature.split('_')[1]) - 1
+                    if lag_num < len(current_lags):
+                        feature_values.append(current_lags[lag_num])
+                    else:
+                        feature_values.append(0)
+                elif feature == 'Rolling_Mean_3':
+                    feature_values.append(historical_mean_3)
+                elif feature == 'Rolling_Mean_7':
+                    feature_values.append(historical_mean_7)
+                else:
+                    # Regular features
+                    if feature in row:
+                        feature_values.append(row[feature])
+                    else:
+                        feature_values.append(0)
             
             # Make prediction
+            feature_vector = np.array(feature_values).reshape(1, -1)
             pred = model.predict(feature_vector)[0]
-            pred = max(0, pred)  # Ensure non-negative predictions
+            pred = max(0, pred)  # Ensure non-negative
             predictions.append(pred)
             
             # Update lags for next prediction
@@ -257,14 +262,12 @@ def forecast_with_lags(model, historical_data, future_df, features):
             # Update rolling statistics
             if len(predictions) >= 3:
                 historical_mean_3 = np.mean(predictions[-3:])
-                historical_std_3 = np.std(predictions[-3:])
             if len(predictions) >= 7:
                 historical_mean_7 = np.mean(predictions[-7:])
-                historical_std_7 = np.std(predictions[-7:])
             
         except Exception as e:
-            st.error(f"Error in prediction: {e}")
-            predictions.append(0)
+            st.error(f"Error in prediction step {idx}: {e}")
+            predictions.append(historical_data['Value'].mean())  # Fallback to mean
     
     return predictions
 
@@ -295,7 +298,6 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name):
     # Add vertical line to separate historical and forecast
     last_historical_date = historical_data['Datetime'].max()
     
-    # Convert timestamp to string to avoid plotly issues
     fig.add_shape(
         type="line",
         x0=last_historical_date,
@@ -306,7 +308,6 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name):
         line=dict(color="gray", width=2, dash="dot"),
     )
     
-    # Add annotation for the line
     fig.add_annotation(
         x=last_historical_date,
         y=0.95,
@@ -331,314 +332,216 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name):
 
 def add_forecasting_insights():
     with st.expander("💡 Forecasting Insights & Tips", expanded=False):
-        st.subheader("Making Sense of Your Data Statistics")
+        st.subheader("Data Requirements")
         st.markdown("""
-        Use the 'Detailed Statistical Measurements' section to understand typical patterns in your data:
-        *   **Time of Day:** Which reporting times (8am, 2pm, 8pm) generally have the highest or lowest counts? Are some more volatile (higher standard deviation)?
-        *   **Day of Week:** Are there clear busy days (e.g., Mondays) or quieter days (e.g., weekends)? This can inform staffing and resource allocation.
-        *   **Monthly Trends:** Do you observe seasonal patterns? For example, are certain months consistently busier due to weather or holidays?
-        *   **Hospital Variations:** If you're looking at multiple hospitals, how do these patterns compare across them?
+        For accurate forecasting, you need:
+        * **Minimum 30 records** per hospital-metric combination
+        * **Consistent time intervals** (8am, 2pm, 8pm readings)
+        * **Recent data** (within last 6 months ideally)
+        * **Complete records** (avoid too many missing values)
         """)
-
-        st.subheader("Understanding Key Forecasting Features")
+        
+        st.subheader("Understanding Your Results")
         st.markdown("""
-        The model uses several types of features to learn from historical data:
-        *   **Lag Features:** The model looks at recent past values (lags) because what happened recently often influences the near future. For example, if patient counts were high yesterday, they might be more likely to be high today.
-        *   **Cyclical Time Features (Hour, Day of Week, Month, etc.):** Many activities have natural cycles. Counts might rise and fall predictably depending on the time of day, day of the week, or month of the year. We convert these time aspects into 'cyclical features' (using sine and cosine functions) that help the model learn these repeating patterns. This is more effective than just using numbers like 1-7 for days of the week.
-        *   **Holiday Effects:** Public holidays and special days often have a significant impact on ED and trolley counts. The model is designed to recognize Irish bank holidays and learn their typical influence. If your data includes other recurring local events that affect numbers, consider if these could be added as features in future model versions.
-        *   **Other Factors (`Additional_Capacity`, `DayGAR`):** Features like whether additional capacity was open or the specific 'GAR' (General Adult Report) day type are also included to help the model understand other known influences.
+        * **RMSE (Root Mean Square Error)**: Lower is better. This shows average prediction error.
+        * **Historical vs Forecast**: The chart shows your data pattern and predicted future values.
+        * **Validation**: Shows how well the model predicts on recent historical data.
         """)
-        st.info("Forecasting is about identifying patterns in historical data to predict the future. The more consistent the patterns and the better they are represented by features, the more accurate the forecast is likely to be. However, unexpected events can always affect outcomes.")
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting")
+st.title("🇮🇪 Emergency Department Forecasting (Ireland)")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts")
+
+# Add forecast days control
+forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7)
 
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
 
 if uploaded_file:
-    # Load and prepare data
-    df = pd.read_excel(uploaded_file)
-    df_long = prepare_data(df)
-    
-    # Get unique hospitals for selection
-    hospitals = sorted(df_long['Hospital'].unique())
-
-    # --- Descriptive Statistics Section ---
-    with st.expander("🔬 Detailed Statistical Measurements", expanded=False):
-        st.markdown("""
-        This section provides a statistical overview of the historical data,
-        helping to understand trends and patterns before forecasting.
-        """)
-
-        # Define mappings for DayName and MonthName
-        day_map = {
-            0: 'Monday', 1: 'Tuesday', 2: 'Wednesday', 3: 'Thursday',
-            4: 'Friday', 5: 'Saturday', 6: 'Sunday'
-        }
-        month_map = {
-            1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
-            7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
-        }
-
-        # Apply mappings
-        df_long['DayName'] = df_long['DayOfWeek'].map(day_map)
-        df_long['MonthName'] = df_long['Month'].map(month_map)
-
-        # Aggregation function (optional, but good for consistency)
-        def get_agg_stats(df, group_by_cols):
-            return df.groupby(group_by_cols)['Value'].agg(['mean', 'median', 'min', 'max', 'std']).reset_index()
-
-        st.subheader("Overall Statistics by Metric & Time of Day")
-        stats_by_time = get_agg_stats(df_long, ['Metric', 'TimeLabel'])
-        st.dataframe(stats_by_time.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Overall Statistics by Metric & Day of Week")
-        stats_by_dow = get_agg_stats(df_long, ['Metric', 'DayName'])
-        # Ensure correct order for DayName
-        stats_by_dow['DayName'] = pd.Categorical(stats_by_dow['DayName'], categories=day_map.values(), ordered=True)
-        stats_by_dow = stats_by_dow.sort_values(['Metric', 'DayName'])
-        st.dataframe(stats_by_dow.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Overall Statistics by Metric & Month")
-        stats_by_month = get_agg_stats(df_long, ['Metric', 'MonthName'])
-        # Ensure correct order for MonthName
-        stats_by_month['MonthName'] = pd.Categorical(stats_by_month['MonthName'], categories=month_map.values(), ordered=True)
-        stats_by_month = stats_by_month.sort_values(['Metric', 'MonthName'])
-        st.dataframe(stats_by_month.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.markdown("---")
-        st.subheader("Hospital-Specific Statistics")
-
-        st.info("The following tables show statistics broken down by individual hospitals. This can be useful for comparing trends across different sites.")
-
-        st.subheader("Statistics by Hospital, Metric & Time of Day")
-        stats_by_hosp_time = get_agg_stats(df_long, ['Hospital', 'Metric', 'TimeLabel'])
-        st.dataframe(stats_by_hosp_time.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Statistics by Hospital, Metric & Day of Week")
-        stats_by_hosp_dow = get_agg_stats(df_long, ['Hospital', 'Metric', 'DayName'])
-        stats_by_hosp_dow['DayName'] = pd.Categorical(stats_by_hosp_dow['DayName'], categories=day_map.values(), ordered=True)
-        stats_by_hosp_dow = stats_by_hosp_dow.sort_values(['Hospital', 'Metric', 'DayName'])
-        st.dataframe(stats_by_hosp_dow.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Statistics by Hospital, Metric & Month")
-        stats_by_hosp_month = get_agg_stats(df_long, ['Hospital', 'Metric', 'MonthName'])
-        stats_by_hosp_month['MonthName'] = pd.Categorical(stats_by_hosp_month['MonthName'], categories=month_map.values(), ordered=True)
-        stats_by_hosp_month = stats_by_hosp_month.sort_values(['Hospital', 'Metric', 'MonthName'])
-        st.dataframe(stats_by_hosp_month.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-    add_forecasting_insights()
-    
-    # UI Controls
-    st.sidebar.header("Forecast Settings")
-    
-    # Hospital selection
-    hospital_option = st.sidebar.selectbox(
-        "Select Hospital:",
-        options=["All Hospitals"] + hospitals
-    )
-    
-    # Accuracy Improvement Controls
-    st.sidebar.header("🎯 Accuracy Settings")
-    
-    use_cross_validation = st.sidebar.checkbox("Use Cross-Validation", value=False)
-    ensemble_models = st.sidebar.checkbox("Use Ensemble Models", value=False)
-    
-    # Model hyperparameters
-    with st.sidebar.expander("⚙️ Model Parameters"):
-        n_estimators = st.slider("Number of Trees", 100, 500, 200)
-        learning_rate = st.slider("Learning Rate", 0.01, 0.2, 0.05, 0.01)
-        max_depth = st.slider("Max Depth", 3, 15, 8)
+    try:
+        # Load and prepare data
+        df = pd.read_excel(uploaded_file)
+        df_long = prepare_data(df)
         
-    # Feature importance threshold
-    feature_importance_threshold = st.sidebar.slider(
-        "Feature Importance Threshold", 
-        0.0, 0.1, 0.01, 0.005,
-        help="Remove features below this importance threshold"
-    )
-    
-    # Run button
-    run_forecast = st.sidebar.button("🚀 Run Forecast", type="primary")
-    
-    if run_forecast:
-        st.header("📊 Forecast Results")
+        # Show data info
+        st.success(f"✅ Data loaded successfully! {len(df_long)} records found.")
         
-        # Determine which hospitals to process
-        if hospital_option == "All Hospitals":
-            selected_hospitals = hospitals
-        else:
-            selected_hospitals = [hospital_option]
+        # Get unique hospitals for selection
+        hospitals = sorted(df_long['Hospital'].unique())
         
-        # Enhanced Features for modeling
-        base_features = [
-            'Hour', 'DayOfWeek', 'DayOfMonth', 'Month', 'Quarter', 'WeekOfYear',
-            'IsWeekend', 'IsMonday', 'IsFriday',
-            'Hour_sin', 'Hour_cos', 'Day_sin', 'Day_cos', 'Month_sin', 'Month_cos', 'Week_sin', 'Week_cos',
-            'IsHoliday', 'DaysToHoliday', 'DaysFromHoliday',
-            'IsSummer', 'IsWinter', 'IsSpring',
-            'IsPeakHour', 'IsLowHour',
-            'Hospital_Code', 'Additional_Capacity'
-        ]
+        # Show data summary
+        data_summary = df_long.groupby(['Hospital', 'Metric']).size().reset_index(name='Records')
+        st.subheader("📊 Data Summary by Hospital & Metric")
+        st.dataframe(data_summary, use_container_width=True)
         
-        lag_features = [f'Lag_{i}' for i in range(1, 8)]
-        rolling_features = ['Rolling_Mean_3', 'Rolling_Mean_7', 'Rolling_Std_3', 'Rolling_Std_7']
-        interaction_features = ['Hour_Weekend', 'Month_Weekend']
-        cross_features = [f'{other_metric}_Value', f'{other_metric}_Lag1'] if 'other_metric' in locals() else []
+        # Hospital selection
+        st.sidebar.header("Forecast Settings")
+        hospital_option = st.sidebar.selectbox(
+            "Select Hospital:",
+            options=["All Hospitals"] + hospitals
+        )
         
-        features = base_features + lag_features + rolling_features + interaction_features + cross_features
+        # Run button
+        run_forecast = st.sidebar.button("🚀 Run Forecast", type="primary")
         
-        # Process each selected hospital
-        for hospital in selected_hospitals:
-            st.subheader(f"🏥 {hospital}")
+        if run_forecast:
+            st.header("📊 Forecast Results")
             
-            # Filter data for current hospital
-            hospital_data = df_long[df_long['Hospital'] == hospital].copy()
-            hospital_code = hospital_data['Hospital_Code'].iloc[0]
-            additional_capacity = hospital_data['Additional_Capacity'].fillna(0).iloc[0]
+            # Determine which hospitals to process
+            if hospital_option == "All Hospitals":
+                selected_hospitals = hospitals
+            else:
+                selected_hospitals = [hospital_option]
             
-            # Get last date for this hospital
-            last_date = hospital_data['Datetime'].max().date()
+            # Base features (without lags)
+            base_features = [
+                'Hour', 'DayOfWeek', 'DayOfMonth', 'Month', 'Quarter', 'WeekOfYear',
+                'IsWeekend', 'IsMonday', 'IsFriday',
+                'Hour_sin', 'Hour_cos', 'Day_sin', 'Day_cos', 'Month_sin', 'Month_cos',
+                'IsHoliday', 'IsSummer', 'IsWinter', 'IsPeakHour', 'IsLowHour',
+                'Hospital_Code', 'Additional_Capacity'
+            ]
             
-            # Process ED and Trolley separately
-            for metric in ['ED', 'Trolley']:
-                metric_data = hospital_data[hospital_data['Metric'] == metric].copy()
-                metric_data = metric_data.sort_values('Datetime')
+            # Process each selected hospital
+            for hospital in selected_hospitals:
+                st.subheader(f"🏥 {hospital}")
                 
-                # Enhanced lag features
-                for i in range(1, 8):  # Increase to 7 lags (weekly pattern)
-                    metric_data[f'Lag_{i}'] = metric_data['Value'].shift(i)
+                # Filter data for current hospital
+                hospital_data = df_long[df_long['Hospital'] == hospital].copy()
+                hospital_code = hospital_data['Hospital_Code'].iloc[0]
+                additional_capacity = hospital_data['Additional_Capacity'].fillna(0).iloc[0]
                 
-                # Rolling statistics
-                metric_data['Rolling_Mean_3'] = metric_data['Value'].rolling(window=3).mean()
-                metric_data['Rolling_Mean_7'] = metric_data['Value'].rolling(window=7).mean()
-                metric_data['Rolling_Std_3'] = metric_data['Value'].rolling(window=3).std()
-                metric_data['Rolling_Std_7'] = metric_data['Value'].rolling(window=7).std()
+                # Get last date for this hospital
+                last_date = hospital_data['Datetime'].max().date()
                 
-                # Interaction features
-                metric_data['Hour_Weekend'] = metric_data['Hour'] * metric_data['IsWeekend']
-                metric_data['Month_Weekend'] = metric_data['Month'] * metric_data['IsWeekend']
-                
-                # Add cross-metric features (ED affects Trolley and vice versa)
-                other_metric = 'Trolley' if metric == 'ED' else 'ED'
-                other_data = hospital_data[hospital_data['Metric'] == other_metric].copy()
-                if len(other_data) > 0:
-                    other_data = other_data.sort_values('Datetime')
-                    # Merge on datetime to get cross-metric features
-                    cross_merge = pd.merge(metric_data[['Datetime']], other_data[['Datetime', 'Value']], 
-                                         on='Datetime', how='left', suffixes=('', f'_{other_metric}'))
-                    metric_data[f'{other_metric}_Value'] = cross_merge['Value'].fillna(method='ffill')
-                    metric_data[f'{other_metric}_Lag1'] = metric_data[f'{other_metric}_Value'].shift(1)
-                else:
-                    metric_data[f'{other_metric}_Value'] = 0
-                    metric_data[f'{other_metric}_Lag1'] = 0
-                
-                metric_data.dropna(inplace=True)
-                
-                if len(metric_data) < 10:  # Need minimum data for training
-                    st.warning(f"Insufficient data for {metric} forecasting at {hospital}")
-                    continue
-                
-                # Train model
-                X = metric_data[features]
-                y = metric_data['Value']
-                
-                # Use time-based split (last 20% for testing)
-                split_idx = int(len(X) * 0.8)
-                X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-                y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-                
-                # Enhanced model with better hyperparameters
-                model = lgb.LGBMRegressor(
-                    n_estimators=200,
-                    learning_rate=0.05,
-                    max_depth=8,
-                    num_leaves=31,
-                    subsample=0.8,
-                    colsample_bytree=0.8,
-                    reg_alpha=0.1,
-                    reg_lambda=0.1,
-                    verbose=-1,
-                    random_state=42
-                )
-                model.fit(X_train, y_train)
-                
-                # Calculate model performance
-                y_pred_test = model.predict(X_test)
-                rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
-                
-                # Get test data for display (using the same indices)
-                test_data = metric_data.iloc[split_idx:].copy()
-                test_data['Predicted'] = y_pred_test
-                
-                # Create future dates
-                future_df = create_future_dates(
-                    pd.to_datetime(last_date), 
-                    hospital, 
-                    hospital_code, 
-                    additional_capacity, 
-                    days=forecast_days
-                )
-                
-                # Generate forecasts
-                predictions = forecast_with_lags(model, metric_data, future_df, features)
-                future_df['Predicted'] = predictions
-                
-                # Display metrics
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric(f"{metric} RMSE", f"{rmse:.2f}")
-                with col2:
-                    st.metric(f"Last {metric} Value", f"{metric_data['Value'].iloc[-1]:.0f}")
-                
-                # Create and display plot
-                fig = plot_forecasts(
-                    metric_data.tail(30),  # Show last 30 historical points
-                    future_df,
-                    metric,
-                    hospital
-                )
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show model validation results
-                with st.expander(f"📊 {metric} Model Validation"):
-                    validation_df = test_data[['Datetime', 'Hospital', 'Value', 'Predicted']].copy()
-                    validation_df['Error'] = validation_df['Value'] - validation_df['Predicted']
-                    validation_df['Abs_Error'] = abs(validation_df['Error'])
-                    st.dataframe(validation_df.head(10), use_container_width=True)
-                
-                # Show forecast table
-                with st.expander(f"📋 {metric} Forecast Details"):
-                    forecast_display = future_df[['Datetime', 'Predicted']].copy()
-                    forecast_display['Predicted'] = forecast_display['Predicted'].round(1)
-                    forecast_display['Date'] = forecast_display['Datetime'].dt.date
-                    forecast_display['Time'] = forecast_display['Datetime'].dt.strftime('%I:%M %p')
-                    st.dataframe(
-                        forecast_display[['Date', 'Time', 'Predicted']],
-                        use_container_width=True
+                # Process ED and Trolley separately
+                for metric in ['ED', 'Trolley']:
+                    metric_data = hospital_data[hospital_data['Metric'] == metric].copy()
+                    metric_data = metric_data.sort_values('Datetime').reset_index(drop=True)
+                    
+                    # Check if we have sufficient data
+                    if len(metric_data) < 10:
+                        st.warning(f"⚠️ Insufficient data for {metric} at {hospital} ({len(metric_data)} records). Need at least 10 records.")
+                        continue
+                    
+                    st.info(f"Processing {metric} for {hospital} ({len(metric_data)} records)")
+                    
+                    # Add lag features intelligently
+                    metric_data, lag_features = add_lag_features_smart(metric_data)
+                    
+                    # Combine all features
+                    all_features = base_features + lag_features
+                    
+                    # Remove any features that don't exist in the data
+                    available_features = [f for f in all_features if f in metric_data.columns]
+                    
+                    # Final check for training data
+                    training_data = metric_data.dropna(subset=available_features + ['Value'])
+                    
+                    if len(training_data) < 5:
+                        st.warning(f"⚠️ After preprocessing, insufficient data for {metric} at {hospital} ({len(training_data)} records). Need at least 5 records.")
+                        continue
+                    
+                    # Train model
+                    X = training_data[available_features]
+                    y = training_data['Value']
+                    
+                    # Use simple split for small datasets
+                    if len(X) < 20:
+                        # Use all data for training with small datasets
+                        X_train, X_test = X, X.tail(min(3, len(X)))
+                        y_train, y_test = y, y.tail(min(3, len(y)))
+                    else:
+                        # Use time-based split for larger datasets
+                        split_idx = int(len(X) * 0.8)
+                        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+                        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+                    
+                    # Simple model configuration for small datasets
+                    model = lgb.LGBMRegressor(
+                        n_estimators=min(100, len(X_train) * 2),  # Adapt to data size
+                        learning_rate=0.1,
+                        max_depth=min(6, len(available_features) // 2 + 1),
+                        num_leaves=min(31, 2 ** min(6, len(available_features) // 2 + 1) - 1),
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        verbose=-1,
+                        random_state=42,
+                        force_col_wise=True
                     )
-                
-                # Download button for forecasts
-                csv_data = future_df[['Datetime', 'Hospital', 'Predicted']].copy()
-                csv_data['Metric'] = metric
-                st.download_button(
-                    f"📥 Download {metric} Forecast CSV",
-                    csv_data.to_csv(index=False),
-                    file_name=f"{hospital}_{metric}_forecast.csv",
-                    mime="text/csv",
-                    key=f"{hospital}_{metric}_download"
-                )
-                
-                st.divider()
-    
-    # Show data summary
-    with st.expander("📈 Data Summary"):
-        st.write("**Hospitals in dataset:**", len(hospitals))
-        st.write("**Date range:**", f"{df_long['Datetime'].min().date()} to {df_long['Datetime'].max().date()}")
-        st.write("**Total records:**", len(df_long))
+                    
+                    try:
+                        model.fit(X_train, y_train)
+                        
+                        # Calculate model performance
+                        y_pred_test = model.predict(X_test)
+                        rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+                        
+                        # Create future dates
+                        future_df = create_future_dates(
+                            pd.to_datetime(last_date), 
+                            hospital, 
+                            hospital_code, 
+                            additional_capacity, 
+                            days=forecast_days
+                        )
+                        
+                        # Generate forecasts
+                        predictions = forecast_with_lags(model, training_data, future_df, available_features)
+                        future_df['Predicted'] = predictions
+                        
+                        # Display metrics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric(f"{metric} RMSE", f"{rmse:.2f}")
+                        with col2:
+                            st.metric(f"Training Records", f"{len(X_train)}")
+                        with col3:
+                            st.metric(f"Last {metric} Value", f"{training_data['Value'].iloc[-1]:.0f}")
+                        
+                        # Create and display plot
+                        fig = plot_forecasts(
+                            training_data.tail(21),  # Show last 21 points (1 week at 3x/day)
+                            future_df,
+                            metric,
+                            hospital
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Show forecast table
+                        with st.expander(f"📋 {metric} Forecast Details"):
+                            forecast_display = future_df[['Datetime', 'Predicted']].copy()
+                            forecast_display['Predicted'] = forecast_display['Predicted'].round(1)
+                            forecast_display['Date'] = forecast_display['Datetime'].dt.date
+                            forecast_display['Time'] = forecast_display['Datetime'].dt.strftime('%I:%M %p')
+                            st.dataframe(
+                                forecast_display[['Date', 'Time', 'Predicted']],
+                                use_container_width=True
+                            )
+                        
+                        # Download button for forecasts
+                        csv_data = future_df[['Datetime', 'Hospital', 'Predicted']].copy()
+                        csv_data['Metric'] = metric
+                        st.download_button(
+                            f"📥 Download {metric} Forecast CSV",
+                            csv_data.to_csv(index=False),
+                            file_name=f"{hospital}_{metric}_forecast.csv",
+                            mime="text/csv",
+                            key=f"{hospital}_{metric}_download"
+                        )
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error training model for {metric} at {hospital}: {str(e)}")
+                        st.info("This might be due to insufficient data or data quality issues.")
+                    
+                    st.divider()
         
-        # Show sample data
-        st.dataframe(df_long.head(10), use_container_width=True)
+        # Add insights
+        add_forecasting_insights()
+        
+    except Exception as e:
+        st.error(f"❌ Error processing file: {str(e)}")
+        st.info("Please check that your Excel file contains the required columns and data format.")
 
 else:
     st.info("👆 Please upload an Excel file to begin forecasting")
@@ -658,5 +561,6 @@ else:
         **Data should contain:**
         - Historical ED and trolley wait data
         - Multiple hospitals (optional)
-        - At least 30 days of historical data for reliable forecasting
+        - At least 10-15 records per hospital-metric combination for basic forecasting
+        - At least 30+ records per hospital-metric combination for reliable forecasting
         """)
