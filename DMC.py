@@ -329,27 +329,6 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name):
     
     return fig
 
-def add_forecasting_insights():
-    with st.expander("💡 Forecasting Insights & Tips", expanded=False):
-        st.subheader("Making Sense of Your Data Statistics")
-        st.markdown("""
-        Use the 'Detailed Statistical Measurements' section to understand typical patterns in your data:
-        *   **Time of Day:** Which reporting times (8am, 2pm, 8pm) generally have the highest or lowest counts? Are some more volatile (higher standard deviation)?
-        *   **Day of Week:** Are there clear busy days (e.g., Mondays) or quieter days (e.g., weekends)? This can inform staffing and resource allocation.
-        *   **Monthly Trends:** Do you observe seasonal patterns? For example, are certain months consistently busier due to weather or holidays?
-        *   **Hospital Variations:** If you're looking at multiple hospitals, how do these patterns compare across them?
-        """)
-
-        st.subheader("Understanding Key Forecasting Features")
-        st.markdown("""
-        The model uses several types of features to learn from historical data:
-        *   **Lag Features:** The model looks at recent past values (lags) because what happened recently often influences the near future. For example, if patient counts were high yesterday, they might be more likely to be high today.
-        *   **Cyclical Time Features (Hour, Day of Week, Month, etc.):** Many activities have natural cycles. Counts might rise and fall predictably depending on the time of day, day of the week, or month of the year. We convert these time aspects into 'cyclical features' (using sine and cosine functions) that help the model learn these repeating patterns. This is more effective than just using numbers like 1-7 for days of the week.
-        *   **Holiday Effects:** Public holidays and special days often have a significant impact on ED and trolley counts. The model is designed to recognize Irish bank holidays and learn their typical influence. If your data includes other recurring local events that affect numbers, consider if these could be added as features in future model versions.
-        *   **Other Factors (`Additional_Capacity`, `DayGAR`):** Features like whether additional capacity was open or the specific 'GAR' (General Adult Report) day type are also included to help the model understand other known influences.
-        """)
-        st.info("Forecasting is about identifying patterns in historical data to predict the future. The more consistent the patterns and the better they are represented by features, the more accurate the forecast is likely to be. However, unexpected events can always affect outcomes.")
-
 # --- Streamlit UI ---
 st.title("🇮🇪 Emergency Department Forecasting (Ireland)")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts")
@@ -363,72 +342,6 @@ if uploaded_file:
     
     # Get unique hospitals for selection
     hospitals = sorted(df_long['Hospital'].unique())
-
-    # --- Descriptive Statistics Section ---
-    with st.expander("🔬 Detailed Statistical Measurements", expanded=False):
-        st.markdown("""
-        This section provides a statistical overview of the historical data,
-        helping to understand trends and patterns before forecasting.
-        """)
-
-        # Define mappings for DayName and MonthName
-        day_map = {
-            0: 'Monday', 1: 'Tuesday', 2: 'Wednesday', 3: 'Thursday',
-            4: 'Friday', 5: 'Saturday', 6: 'Sunday'
-        }
-        month_map = {
-            1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
-            7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
-        }
-
-        # Apply mappings
-        df_long['DayName'] = df_long['DayOfWeek'].map(day_map)
-        df_long['MonthName'] = df_long['Month'].map(month_map)
-
-        # Aggregation function (optional, but good for consistency)
-        def get_agg_stats(df, group_by_cols):
-            return df.groupby(group_by_cols)['Value'].agg(['mean', 'median', 'min', 'max', 'std']).reset_index()
-
-        st.subheader("Overall Statistics by Metric & Time of Day")
-        stats_by_time = get_agg_stats(df_long, ['Metric', 'TimeLabel'])
-        st.dataframe(stats_by_time.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Overall Statistics by Metric & Day of Week")
-        stats_by_dow = get_agg_stats(df_long, ['Metric', 'DayName'])
-        # Ensure correct order for DayName
-        stats_by_dow['DayName'] = pd.Categorical(stats_by_dow['DayName'], categories=day_map.values(), ordered=True)
-        stats_by_dow = stats_by_dow.sort_values(['Metric', 'DayName'])
-        st.dataframe(stats_by_dow.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Overall Statistics by Metric & Month")
-        stats_by_month = get_agg_stats(df_long, ['Metric', 'MonthName'])
-        # Ensure correct order for MonthName
-        stats_by_month['MonthName'] = pd.Categorical(stats_by_month['MonthName'], categories=month_map.values(), ordered=True)
-        stats_by_month = stats_by_month.sort_values(['Metric', 'MonthName'])
-        st.dataframe(stats_by_month.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.markdown("---")
-        st.subheader("Hospital-Specific Statistics")
-
-        st.info("The following tables show statistics broken down by individual hospitals. This can be useful for comparing trends across different sites.")
-
-        st.subheader("Statistics by Hospital, Metric & Time of Day")
-        stats_by_hosp_time = get_agg_stats(df_long, ['Hospital', 'Metric', 'TimeLabel'])
-        st.dataframe(stats_by_hosp_time.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Statistics by Hospital, Metric & Day of Week")
-        stats_by_hosp_dow = get_agg_stats(df_long, ['Hospital', 'Metric', 'DayName'])
-        stats_by_hosp_dow['DayName'] = pd.Categorical(stats_by_hosp_dow['DayName'], categories=day_map.values(), ordered=True)
-        stats_by_hosp_dow = stats_by_hosp_dow.sort_values(['Hospital', 'Metric', 'DayName'])
-        st.dataframe(stats_by_hosp_dow.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-        st.subheader("Statistics by Hospital, Metric & Month")
-        stats_by_hosp_month = get_agg_stats(df_long, ['Hospital', 'Metric', 'MonthName'])
-        stats_by_hosp_month['MonthName'] = pd.Categorical(stats_by_hosp_month['MonthName'], categories=month_map.values(), ordered=True)
-        stats_by_hosp_month = stats_by_hosp_month.sort_values(['Hospital', 'Metric', 'MonthName'])
-        st.dataframe(stats_by_hosp_month.style.format({'mean': '{:.2f}', 'median': '{:.2f}', 'std': '{:.2f}'}))
-
-    add_forecasting_insights()
     
     # UI Controls
     st.sidebar.header("Forecast Settings")
@@ -527,7 +440,7 @@ if uploaded_file:
                     # Merge on datetime to get cross-metric features
                     cross_merge = pd.merge(metric_data[['Datetime']], other_data[['Datetime', 'Value']], 
                                          on='Datetime', how='left', suffixes=('', f'_{other_metric}'))
-                    metric_data[f'{other_metric}_Value'] = cross_merge['Value'].fillna(method='ffill')
+                    metric_data[f'{other_metric}_Value'] = cross_merge[f'Value_{other_metric}'].fillna(method='ffill')
                     metric_data[f'{other_metric}_Lag1'] = metric_data[f'{other_metric}_Value'].shift(1)
                 else:
                     metric_data[f'{other_metric}_Value'] = 0
