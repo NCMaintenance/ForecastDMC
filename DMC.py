@@ -28,23 +28,9 @@ class IrishBankHolidays(AbstractHolidayCalendar):
         Holiday("St. Stephen's Day", month=12, day=26),
     ]
 
-
 def prepare_data(df):
-    # This wrapper ensures that the global IrishBankHolidays class is passed to the implementation
-    # assuming IrishBankHolidays is defined globally in DMC.py
-    return prepare_data_new_implementation_logic(df, IrishBankHolidays)
-
-
-def prepare_data_new_implementation_logic(df, IrishBankHolidays_class_for_instantiation):
-    # df is the input DataFrame
-    # IrishBankHolidays_class_for_instantiation is the actual IrishBankHolidays class
-
-    # 1. Create the column for the new forecast target from the original morning value
-    df['AC_Target_Value_For_Melting'] = df['AdditionalCapacityOpen Morning']
-
-    # Rename columns for ED, Trolley.
-    # 'AdditionalCapacityOpen Morning' will be renamed to 'Additional_Capacity'
-    # This 'Additional_Capacity' column will then be forward-filled and used as a FEATURE.
+    """Prepare and feature engineer the data with improved handling"""
+    # Rename columns
     df = df.rename(columns={
         'Tracker8am': 'ED_8am',
         'Tracker2pm': 'ED_2pm',
@@ -52,69 +38,44 @@ def prepare_data_new_implementation_logic(df, IrishBankHolidays_class_for_instan
         'TimeTotal_8am': 'Trolley_8am',
         'TimeTotal_2pm': 'Trolley_2pm',
         'TimeTotal_8pm': 'Trolley_8pm',
-        'AdditionalCapacityOpen Morning': 'Additional_Capacity' # This will be ffilled and used as a feature
+        'AdditionalCapacityOpen Morning': 'Additional_Capacity'
     })
 
-    # Fill the 'Additional_Capacity' (feature) across the day
-    if not pd.api.types.is_datetime64_any_dtype(df['Date']):
-        df['Date_dt'] = pd.to_datetime(df['Date'])
-        date_col_for_groupby = 'Date_dt'
-    else:
-        date_col_for_groupby = 'Date'
-
-    df['Additional_Capacity'] = df.groupby(['Hospital', df[date_col_for_groupby].dt.date])['Additional_Capacity'].transform('first')
+    # Fill Additional Capacity across the day
+    df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
     df['Additional_Capacity'] = df['Additional_Capacity'].fillna(0)
-
-    if 'Date_dt' in df.columns: # Clean up temp column
-        df.drop(columns=['Date_dt'], inplace=True)
 
     # Reshape to long format
     df_long = pd.melt(
         df,
-        id_vars=['Hospital Group Name', 'Hospital', 'Date', 'DayGAR', 'Additional_Capacity'], # 'Additional_Capacity' (the feature) is an id_var
-        value_vars=['ED_8am', 'ED_2pm', 'ED_8pm', 'Trolley_8am', 'Trolley_2pm', 'Trolley_8pm', 'AC_Target_Value_For_Melting'], # Add the new target here
+        id_vars=['Hospital Group Name', 'Hospital', 'Date', 'DayGAR', 'Additional_Capacity'],
+        value_vars=['ED_8am', 'ED_2pm', 'ED_8pm', 'Trolley_8am', 'Trolley_2pm', 'Trolley_8pm'],
         var_name='Metric_Time',
         value_name='Value'
     )
 
+    # Clean and handle missing values early
+    df_long = df_long.dropna(subset=['Value'])
     df_long['Value'] = pd.to_numeric(df_long['Value'], errors='coerce')
     df_long = df_long.dropna(subset=['Value'])
 
-
-    metrics = []
-    time_labels = []
-
-    for mt_val in df_long['Metric_Time']:
-        if mt_val == 'AC_Target_Value_For_Melting':
-            metrics.append('Additional_Capacity_Target') # This is the new metric name
-            time_labels.append('8am') # Default time, as it's a daily morning value
-        else:
-            parts = mt_val.split('_')
-            metrics.append(parts[0]) # e.g., 'ED' or 'Trolley'
-            time_labels.append(parts[1]) # e.g., '8am', '2pm'
-
-    df_long['Metric'] = metrics
-    df_long['TimeLabel'] = time_labels
-
+    df_long[['Metric', 'TimeLabel']] = df_long['Metric_Time'].str.extract(r'(\w+)_([\d]+[ap]m)')
     time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
     df_long['TimeStr'] = df_long['TimeLabel'].map(time_map)
+    df_long['Datetime'] = pd.to_datetime(df_long['Date'].astype(str) + ' ' + df_long['TimeStr'])
 
-    # Ensure 'Date' is datetime, handling potential pre-conversion
-    if not pd.api.types.is_datetime64_any_dtype(df_long['Date']):
-        df_long['Date'] = pd.to_datetime(df_long['Date'])
-
-    df_long['Datetime'] = pd.to_datetime(df_long['Date'].dt.strftime('%Y-%m-%d') + ' ' + df_long['TimeStr'])
-
+    # Basic time features
     df_long['Hour'] = df_long['Datetime'].dt.hour
     df_long['DayOfWeek'] = df_long['Datetime'].dt.dayofweek
     df_long['DayOfMonth'] = df_long['Datetime'].dt.day
     df_long['Month'] = df_long['Datetime'].dt.month
     df_long['Quarter'] = df_long['Datetime'].dt.quarter
-    df_long['WeekOfYear'] = df_long['Datetime'].dt.isocalendar().week.astype(int)
+    df_long['WeekOfYear'] = df_long['Datetime'].dt.isocalendar().week
     df_long['IsWeekend'] = df_long['DayOfWeek'].isin([5, 6]).astype(int)
     df_long['IsMonday'] = (df_long['DayOfWeek'] == 0).astype(int)
     df_long['IsFriday'] = (df_long['DayOfWeek'] == 4).astype(int)
     
+    # Cyclical encoding for time features
     df_long['Hour_sin'] = np.sin(2 * np.pi * df_long['Hour'] / 24)
     df_long['Hour_cos'] = np.cos(2 * np.pi * df_long['Hour'] / 24)
     df_long['Day_sin'] = np.sin(2 * np.pi * df_long['DayOfWeek'] / 7)
@@ -122,30 +83,25 @@ def prepare_data_new_implementation_logic(df, IrishBankHolidays_class_for_instan
     df_long['Month_sin'] = np.sin(2 * np.pi * df_long['Month'] / 12)
     df_long['Month_cos'] = np.cos(2 * np.pi * df_long['Month'] / 12)
 
-    calendar = IrishBankHolidays_class_for_instantiation() # Instantiate the passed class
+    # Add Irish holidays
+    calendar = IrishBankHolidays()
     try:
-        min_dt = df_long['Datetime'].min()
-        max_dt = df_long['Datetime'].max()
-        if hasattr(min_dt, 'tzinfo') and min_dt.tzinfo is not None:
-            min_dt = min_dt.tz_localize(None)
-        if hasattr(max_dt, 'tzinfo') and max_dt.tzinfo is not None:
-            max_dt = max_dt.tz_localize(None)
-
-        # Ensure timedelta is available
-        from datetime import timedelta
-        holidays = calendar.holidays(start=min_dt, end=max_dt + timedelta(days=30))
+        holidays = calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max() + timedelta(days=30))
         df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
-    except Exception as e:
-        print(f"Holiday calculation issue: {e}")
+    except:
         df_long['IsHoliday'] = 0
 
+    # Seasonal indicators
     df_long['IsSummer'] = df_long['Month'].isin([6, 7, 8]).astype(int)
     df_long['IsWinter'] = df_long['Month'].isin([12, 1, 2]).astype(int)
     
+    # Peak hour indicators
     df_long['IsPeakHour'] = df_long['Hour'].isin([20]).astype(int)
     df_long['IsLowHour'] = df_long['Hour'].isin([8]).astype(int)
 
+    # Encode hospital
     df_long['Hospital_Code'] = df_long['Hospital'].astype('category').cat.codes
+
     return df_long
 
 def add_lag_features_smart(df, min_data_threshold=20):
@@ -393,7 +349,7 @@ def add_forecasting_insights():
         """)
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting")
+st.title("Emergency Department Forecasting (Ireland)")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts")
 
 # Add forecast days control
@@ -459,7 +415,7 @@ if uploaded_file:
                 last_date = hospital_data['Datetime'].max().date()
                 
                 # Process ED and Trolley separately
-                for metric in ['ED', 'Trolley', 'Additional_Capacity_Target']:
+                for metric in ['ED', 'Trolley']:
                     metric_data = hospital_data[hospital_data['Metric'] == metric].copy()
                     metric_data = metric_data.sort_values('Datetime').reset_index(drop=True)
                     
@@ -487,12 +443,7 @@ if uploaded_file:
                         continue
                     
                     # Train model
-                    current_model_features = available_features.copy()
-                    if metric == 'Additional_Capacity_Target':
-                        if 'Additional_Capacity' in current_model_features:
-                            current_model_features.remove('Additional_Capacity')
-                            # st.write(f"Feature 'Additional_Capacity' removed for training 'Additional_Capacity_Target' metric.") # For debugging in Streamlit
-                    X = training_data[current_model_features]
+                    X = training_data[available_features]
                     y = training_data['Value']
                     
                     # Use simple split for small datasets
@@ -560,7 +511,7 @@ if uploaded_file:
                         # Show forecast table
                         with st.expander(f"📋 {metric} Forecast Details"):
                             forecast_display = future_df[['Datetime', 'Predicted']].copy()
-                            forecast_display['Predicted'] = forecast_display['Predicted'].round(0)
+                            forecast_display['Predicted'] = forecast_display['Predicted'].round(1)
                             forecast_display['Date'] = forecast_display['Datetime'].dt.date
                             forecast_display['Time'] = forecast_display['Datetime'].dt.strftime('%I:%M %p')
                             st.dataframe(
