@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
+from datetime import timedelta # Added for holiday calculations
 
-def process_data(df: pd.DataFrame) -> pd.DataFrame:
+def process_data(df: pd.DataFrame, irish_holidays_calendar: callable) -> pd.DataFrame:
     """
     Processes the raw hospital data:
     - Renames columns
@@ -16,7 +17,7 @@ def process_data(df: pd.DataFrame) -> pd.DataFrame:
             'Tracker8am': 'ED_8am',
             'Tracker2pm': 'ED_2pm',
             'Tracker8pm': 'ED_8pm',
-            'AdditionalCapacityOpen Morning': 'Additional_Surgery_Capacity',
+            'AdditionalCapacityOpen Morning': 'Additional_Capacity',
             'TimeTotal_8am': 'Trolley_8am',
             'TimeTotal_2pm': 'Trolley_2pm',
             'TimeTotal_8pm': 'Trolley_8pm'
@@ -25,8 +26,17 @@ def process_data(df: pd.DataFrame) -> pd.DataFrame:
         # Ensure 'Date' column is datetime
         df['Date'] = pd.to_datetime(df['Date'])
 
+        # Fill Additional Capacity across the day - important to do this before melt
+        if 'Additional_Capacity' in df.columns and 'Hospital' in df.columns and 'Date' in df.columns:
+            df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
+        else:
+            # Handle cases where these columns might be missing, perhaps by logging or setting a default
+            # For now, if 'Additional_Capacity' is there, we assume it's already properly filled or doesn't need this transformation.
+            pass
+
+
         # Melt the dataset into long format
-        id_vars = ['Hospital Group Name', 'Hospital', 'Date', 'Additional_Surgery_Capacity', 'DayGAR']
+        id_vars = ['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity', 'DayGAR']
         value_vars = ['ED_8am', 'ED_2pm', 'ED_8pm', 'Trolley_8am', 'Trolley_2pm', 'Trolley_8pm']
 
         # Filter out columns that might not exist in a user's upload
@@ -58,38 +68,81 @@ def process_data(df: pd.DataFrame) -> pd.DataFrame:
 
         # Extract time-based features
         df_long['Hour'] = df_long['Datetime'].dt.hour
-        df_long['DayOfWeek'] = df_long['Datetime'].dt.dayofweek # Monday=0, Sunday=6
+        df_long['DayOfWeek'] = df_long['Datetime'].dt.dayofweek  # Monday=0, Sunday=6
+        df_long['DayOfMonth'] = df_long['Datetime'].dt.day
+        df_long['Month'] = df_long['Datetime'].dt.month
+        df_long['Quarter'] = df_long['Datetime'].dt.quarter
+        # Ensure WeekOfYear is integer
+        df_long['WeekOfYear'] = df_long['Datetime'].dt.isocalendar().week.astype(int)
         df_long['IsWeekend'] = df_long['DayOfWeek'].isin([5, 6]).astype(int)
+        df_long['IsMonday'] = (df_long['DayOfWeek'] == 0).astype(int)
+        df_long['IsFriday'] = (df_long['DayOfWeek'] == 4).astype(int)
 
-        # Add cyclical features for hour of day
+        # Add cyclical features
         df_long['Hour_sin'] = np.sin(2 * np.pi * df_long['Hour'] / 24)
         df_long['Hour_cos'] = np.cos(2 * np.pi * df_long['Hour'] / 24)
-
-        # Add cyclical features for day of week
         df_long['Day_sin'] = np.sin(2 * np.pi * df_long['DayOfWeek'] / 7)
         df_long['Day_cos'] = np.cos(2 * np.pi * df_long['DayOfWeek'] / 7)
+        df_long['Month_sin'] = np.sin(2 * np.pi * df_long['Month'] / 12)
+        df_long['Month_cos'] = np.cos(2 * np.pi * df_long['Month'] / 12)
+        df_long['Week_sin'] = np.sin(2 * np.pi * df_long['WeekOfYear'] / 52)
+        df_long['Week_cos'] = np.cos(2 * np.pi * df_long['WeekOfYear'] / 52)
 
-        # Sort by Hospital, Metric, and Datetime to ensure correct lag/rolling calculations
-        df_long = df_long.sort_values(by=['Hospital', 'Metric', 'Datetime'])
+        # Add Irish holidays
+        # irish_holidays_calendar should be an instance of IrishBankHolidays passed to the function
+        holidays = irish_holidays_calendar.holidays(start=df_long['Datetime'].min(), end=df_long['Datetime'].max() + timedelta(days=30))
+        df_long['IsHoliday'] = df_long['Datetime'].dt.normalize().isin(holidays).astype(int)
 
-        # Add Lag Features (value from 1 day ago for the same hospital, metric, and time of day)
-        # We group by Hospital, Metric, and the original TimeLabel (8am, 2pm, 8pm)
-        # then shift. This assumes we want to compare 8am to 8am, 2pm to 2pm etc. on consecutive days.
-        df_long['Lag_1Day_Value'] = df_long.groupby(['Hospital', 'Metric', 'TimeLabel'])['Value'].shift(1)
+        # Holiday proximity features
+        df_long['DaysToHoliday'] = 0
+        df_long['DaysFromHoliday'] = 0
 
-        # Add Rolling Window Features (e.g., 7-day rolling mean)
-        # The rolling window is calculated over the 'Value' for each group.
-        # The window size is 7, min_periods is 1 to output a value even if less than 7 days of data are available.
-        # .shift(1) is used to ensure the rolling mean uses data *before* the current day, not including current day.
-        df_long['Rolling_Mean_7D_Value'] = df_long.groupby(['Hospital', 'Metric', 'TimeLabel'])['Value']\
-                                               .rolling(window=7, min_periods=1)\
-                                               .mean()\
-                                               .reset_index(level=[0,1,2], drop=True)\
-                                               .shift(1) # Use data prior to the current observation
+        # This loop can be slow for large datasets. Consider vectorizing if performance is an issue.
+        # For now, keeping it as is to match DMC.py's logic.
+        for idx, row in df_long.iterrows():
+            date = row['Datetime'].normalize()
+            future_holidays = [h for h in holidays if h >= date]
+            past_holidays = [h for h in holidays if h < date]
 
+            if future_holidays:
+                df_long.loc[idx, 'DaysToHoliday'] = (min(future_holidays) - date).days
+            else:
+                df_long.loc[idx, 'DaysToHoliday'] = 365  # Far future
+
+            if past_holidays:
+                df_long.loc[idx, 'DaysFromHoliday'] = (date - max(past_holidays)).days
+            else:
+                df_long.loc[idx, 'DaysFromHoliday'] = 365  # Far past
+
+        # Seasonal indicators
+        df_long['IsSummer'] = df_long['Month'].isin([6, 7, 8]).astype(int)
+        df_long['IsWinter'] = df_long['Month'].isin([12, 1, 2]).astype(int)
+        df_long['IsSpring'] = df_long['Month'].isin([3, 4, 5]).astype(int)
+
+        # Peak hour indicators
+        df_long['IsPeakHour'] = df_long['Hour'].isin([20]).astype(int)
+        df_long['IsLowHour'] = df_long['Hour'].isin([8]).astype(int)
+
+        # Encode hospital if 'Hospital' column exists
+        if 'Hospital' in df_long.columns:
+            df_long['Hospital_Code'] = df_long['Hospital'].astype('category').cat.codes
+        else:
+            df_long['Hospital_Code'] = 0 # Default or handle as per requirements
+
+        # Sort by Hospital, Metric, and Datetime (important for consistency and some subsequent operations in DMC.py)
+        # Ensure 'Hospital' and 'Metric' are present before sorting by them.
+        sort_by_cols = []
+        if 'Hospital' in df_long.columns:
+            sort_by_cols.append('Hospital')
+        if 'Metric' in df_long.columns:
+            sort_by_cols.append('Metric')
+        sort_by_cols.append('Datetime')
+        df_long = df_long.sort_values(by=sort_by_cols)
 
         # Final cleanup
-        df_long = df_long.drop(columns=['Metric_Time', 'TimeStr']) # TimeLabel might be useful
+        # We will keep TimeLabel as it might be useful for analysis or direct use in DMC.py
+        # Metric_Time and TimeStr are intermediate and can be dropped.
+        df_long = df_long.drop(columns=['Metric_Time', 'TimeStr'], errors='ignore')
 
         return df_long
 
@@ -102,13 +155,23 @@ def process_data(df: pd.DataFrame) -> pd.DataFrame:
 
 if __name__ == '__main__':
     # Example Usage (for testing purposes)
-    # Create a sample DataFrame similar to what an Excel upload might look like
+    # --- Define a dummy Irish Bank Holidays for testing ---
+    from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday
+    from pandas.tseries.offsets import DateOffset # Required if using offset in Holiday rules
+    from dateutil.rrule import MO # Required if using MO in Holiday rules
+
+    class DummyIrishBankHolidays(AbstractHolidayCalendar):
+        rules = [
+            Holiday("New Year's Day", month=1, day=1), # Simple holiday for testing
+            Holiday("St. Patrick's Day", month=3, day=17),
+        ]
+
     data = {
         'Hospital Group Name': ['Group A', 'Group A', 'Group B', 'Group B'] * 6,
         'Hospital': ['Hospital1', 'Hospital1', 'Hospital2', 'Hospital2'] * 6,
         'Date': pd.to_datetime(['2023-01-01', '2023-01-01', '2023-01-01', '2023-01-01',
-                                '2023-01-02', '2023-01-02', '2023-01-02', '2023-01-02',
-                                '2023-01-03', '2023-01-03', '2023-01-03', '2023-01-03',
+                                '2023-03-16', '2023-03-16', '2023-03-17', '2023-03-17', # Include dates around a holiday
+                                '2023-03-18', '2023-03-18', '2023-03-18', '2023-03-18',
                                 '2023-01-04', '2023-01-04', '2023-01-04', '2023-01-04',
                                 '2023-01-05', '2023-01-05', '2023-01-05', '2023-01-05',
                                 '2023-01-06', '2023-01-06', '2023-01-06', '2023-01-06',
@@ -116,7 +179,7 @@ if __name__ == '__main__':
         'Tracker8am': np.random.randint(50, 100, 24),
         'Tracker2pm': np.random.randint(60, 110, 24),
         'Tracker8pm': np.random.randint(70, 120, 24),
-        'AdditionalCapacityOpen Morning': [True, False, True, False] * 6,
+        'AdditionalCapacityOpen Morning': [True, False, True, False, True, True, False, False] * 3,
         'DayGAR': ['GAR1', 'GAR2', 'GAR1', 'GAR2'] * 6,
         'TimeTotal_8am': np.random.randint(5, 20, 24),
         'TimeTotal_2pm': np.random.randint(10, 25, 24),
@@ -127,20 +190,36 @@ if __name__ == '__main__':
     print("Original Sample DataFrame:")
     print(sample_df.head())
 
-    processed_df = process_data(sample_df.copy()) # Use .copy() to avoid modifying original sample_df
+    holiday_calendar_instance = DummyIrishBankHolidays()
+
+    # Pass the holiday calendar to process_data
+    processed_df = process_data(sample_df.copy(), irish_holidays_calendar=holiday_calendar_instance)
 
     if not processed_df.empty:
         print("\nProcessed DataFrame head:")
-        print(processed_df.head())
+        print(processed_df.head(10)) # Show more rows
         print("\nProcessed DataFrame columns:")
         print(processed_df.columns)
-        print("\nInfo for a specific group (Hospital1, ED, 8am) to check lag/roll features:")
-        # Filter for a specific group to check lag/rolling features more easily
-        example_group = processed_df[
-            (processed_df['Hospital'] == 'Hospital1') &
-            (processed_df['Metric'] == 'ED') &
-            (processed_df['TimeLabel'] == '8am')
-        ]
-        print(example_group[['Date', 'Datetime', 'Value', 'Lag_1Day_Value', 'Rolling_Mean_7D_Value']])
+        print("\nInfo for a specific group (Hospital1, ED, 8am) to check features including holiday features:")
+
+        # Ensure the columns for filtering exist before attempting to filter
+        if all(col in processed_df.columns for col in ['Hospital', 'Metric', 'TimeLabel']):
+            example_group_df = processed_df[
+                (processed_df['Hospital'] == 'Hospital1') &
+                (processed_df['Metric'] == 'ED') &
+                (processed_df['TimeLabel'] == '8am') # Ensure this TimeLabel is generated
+            ]
+            if not example_group_df.empty:
+                relevant_cols = ['Date', 'Datetime', 'Value', 'Hour', 'DayOfWeek', 'IsWeekend',
+                                 'IsHoliday', 'DaysToHoliday', 'DaysFromHoliday', 'Hospital_Code',
+                                 'Month_sin', 'Week_cos', 'IsSummer', 'IsPeakHour', 'Additional_Capacity']
+                # Filter relevant_cols to only those that actually exist in example_group_df
+                display_cols = [col for col in relevant_cols if col in example_group_df.columns]
+                print(example_group_df[display_cols].head(10)) # Show more rows of the example
+            else:
+                print("Could not find the specific example group (Hospital1, ED, 8am).")
+        else:
+            print("One or more columns required for filtering the example group ('Hospital', 'Metric', 'TimeLabel') are missing.")
+
     else:
         print("\nProcessing failed or returned empty DataFrame.")
