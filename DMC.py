@@ -1,15 +1,17 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+# Import all required ML libraries
+import lightgbm as lgb
+import xgboost as xgb
 import catboost as cb
+from sklearn.ensemble import GradientBoostingRegressor # A good scikit-learn equivalent
 from datetime import datetime, timedelta
-from sklearn.model_selection import TimeSeriesSplit # Import TimeSeriesSplit
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
 from dateutil.rrule import MO
-import shap
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -290,6 +292,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     Generates forecasts iteratively, updating lag and rolling features
     with each new prediction.
     historical_data should already be filtered for the specific hospital and target column.
+    Ensures predictions are non-negative and rounded to zero decimal places.
     """
     if historical_data.empty:
         st.error("Historical data for lag forecasting is empty. Cannot generate forecasts.")
@@ -344,6 +347,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
             feature_vector = np.array(feature_values).reshape(1, -1)
             pred = model.predict(feature_vector)[0]
             pred = max(0, pred) # Ensure predictions are non-negative
+            pred = round(pred)   # Round to nearest whole number
             predictions.append(pred)
 
             # Update the lag values for the next prediction step
@@ -446,12 +450,78 @@ def add_forecasting_insights():
         * **Validation**: The model's performance (RMSE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
         """)
 
+def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series):
+    """
+    Initializes and returns the selected machine learning model with appropriate hyperparameters.
+    """
+    if model_name == "CatBoost":
+        model = cb.CatBoostRegressor(
+            iterations=min(1000, len(X_train) * 3), # Dynamic iterations, capped at 1000
+            learning_rate=0.08,
+            depth=6,
+            subsample=0.8,
+            colsample_bylevel=0.8,
+            l2_leaf_reg=3,
+            verbose=False,
+            random_state=42,
+            allow_writing_files=False, # Essential for Streamlit deployment
+            bagging_temperature=1,
+            od_type='Iter',
+            od_wait=50,
+            loss_function='RMSE' # Specify RMSE loss
+        )
+    elif model_name == "LightGBM":
+        model = lgb.LGBMRegressor(
+            n_estimators=min(1000, len(X_train) * 3), # Dynamic estimators, capped
+            learning_rate=0.05,
+            num_leaves=31,
+            max_depth=-1, # No limit
+            min_child_samples=20,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1, # Use all available cores
+            objective='regression_l1' # MAE objective, often more robust to outliers
+        )
+    elif model_name == "XGBoost":
+        model = xgb.XGBRegressor(
+            n_estimators=min(1000, len(X_train) * 3), # Dynamic estimators, capped
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1, # Use all available cores
+            objective='reg:squarederror' # Standard RMSE objective
+        )
+    elif model_name == "GradientBoosting (Scikit-learn)":
+        model = GradientBoostingRegressor(
+            n_estimators=min(500, len(X_train) * 2), # Fewer estimators for GB
+            learning_rate=0.1,
+            max_depth=5,
+            subsample=0.8,
+            random_state=42,
+            loss='huber' # Huber loss is more robust to outliers than squared_error
+        )
+    else:
+        st.error("Invalid model selected. Defaulting to CatBoost.")
+        return get_ml_model("CatBoost", X_train, y_train) # Fallback
+
+    return model
+
 # --- Streamlit UI ---
 st.title("Emergency Department Forecasting (Ireland)")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
 
 # Sidebar control for number of forecast days
 forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7)
+
+# Model selection dropdown in sidebar
+st.sidebar.header("Model Settings")
+model_option = st.sidebar.selectbox(
+    "Select ML Model:",
+    options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)"]
+)
 
 # File uploader widget
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
@@ -532,7 +602,7 @@ if uploaded_file:
                         st.warning(f"⚠️ Insufficient data for '{target_col_name}' at {hospital} ({hospital_data[target_col_name].count()} records). Need at least 10 records for meaningful forecasting.")
                         continue
 
-                    st.info(f"Processing '{target_col_name}' for {hospital} ({hospital_data[target_col_name].count()} records)")
+                    st.info(f"Processing '{target_col_name}' for {hospital} using {model_option}")
 
                     # Add lag and rolling features specifically for the current target column,
                     # ensuring they are calculated within the hospital's data.
@@ -557,21 +627,8 @@ if uploaded_file:
                     X = training_data[available_features]
                     y = training_data[target_col_name]
 
-                    # Initialize CatBoost Regressor with hyperparameters
-                    model = cb.CatBoostRegressor(
-                        iterations=min(1000, len(X) * 3),  # CatBoost can handle more iterations efficiently
-                        learning_rate=0.08,                # Lower learning rate for better generalization
-                        depth=6,                          # CatBoost handles deeper trees better
-                        subsample=0.8,                    # Sampling rate for bagging
-                        colsample_bylevel=0.8,            # Feature subsampling
-                        l2_leaf_reg=3,                    # L2 regularization coefficient
-                        verbose=False,
-                        random_state=42,
-                        allow_writing_files=False,        # Important for Streamlit environment
-                        bagging_temperature=1,             # Controls randomness in Bayesian bootstrap
-                        od_type='Iter',                   # Overfitting detection
-                        od_wait=50                        # Stop if no improvement for 50 iterations
-                    )
+                    # Initialize the selected model
+                    model = get_ml_model(model_option, X, y)
 
                     # --- Time Series Cross-Validation ---
                     avg_rmse = np.nan # Initialize RMSE
@@ -584,9 +641,11 @@ if uploaded_file:
                             y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
                             if len(X_train_fold) > 0 and len(X_test_fold) > 0:
-                                fold_model = cb.CatBoostRegressor(**model.get_params())
-                                fold_model.fit(X_train_fold, y_train_fold, verbose=False)
+                                # Re-initialize model for each fold to ensure clean state
+                                fold_model = get_ml_model(model_option, X_train_fold, y_train_fold)
+                                fold_model.fit(X_train_fold, y_train_fold) # verbose=False is handled within get_ml_model
                                 y_pred_fold = fold_model.predict(X_test_fold)
+                                y_pred_fold = np.maximum(0, y_pred_fold).round(0) # Apply non-negative and rounding to fold predictions
                                 fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
                             else:
                                 st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
@@ -599,18 +658,19 @@ if uploaded_file:
                     else:
                         st.info(f"Not enough data for cross-validation for '{target_col_name}' ({len(X)} records). Training on all available data.")
                         # If not enough for CV, train on all data for the final forecast
-                        model.fit(X, y, verbose=False) # Train on all data for direct RMSE
+                        model.fit(X, y) # verbose=False is handled within get_ml_model
                         if len(X) > 0:
                             y_pred_train = model.predict(X)
+                            y_pred_train = np.maximum(0, y_pred_train).round(0) # Apply non-negative and rounding
                             avg_rmse = np.sqrt(mean_squared_error(y, y_pred_train))
                             st.info(f"Training RMSE for {target_col_name}: {avg_rmse:.2f} (Trained on all available data)")
 
 
                     try:
                         # Train the final model on all available data for the most accurate future forecast
-                        # (This is done above if no CV was performed, or re-done here if CV was skipped for final model)
-                        if avg_rmse is np.nan: # If CV was skipped entirely, ensure model is trained
-                             model.fit(X, y, verbose=False)
+                        # This ensures the final model is trained regardless of CV execution.
+                        model = get_ml_model(model_option, X, y) # Re-initialize to ensure clean state for final training
+                        model.fit(X, y) # verbose=False is handled within get_ml_model
 
 
                         # Create future timestamps for which to generate forecasts
@@ -649,7 +709,7 @@ if uploaded_file:
                         # Allow users to view detailed forecast data in an expandable section
                         with st.expander(f"📋 {target_col_name} Forecast Details"):
                             forecast_display = future_df[['Date', 'Time', 'Predicted']].copy()
-                            forecast_display['Predicted'] = forecast_display['Predicted'].round(1) # Round predictions
+                            forecast_display['Predicted'] = forecast_display['Predicted'].round(0).astype(int) # Ensure int for display
                             st.dataframe(
                                 forecast_display,
                                 use_container_width=True
@@ -658,6 +718,7 @@ if uploaded_file:
                         # Provide a download button for the forecast data
                         csv_data = future_df[['Datetime', 'Hospital', 'Predicted']].copy()
                         csv_data['Metric'] = target_col_name # Identify the metric in the CSV
+                        csv_data['Predicted'] = csv_data['Predicted'].astype(int) # Ensure integer for CSV
                         st.download_button(
                             f"📥 Download {target_col_name} Forecast CSV",
                             csv_data.to_csv(index=False),
@@ -701,5 +762,4 @@ else:
         - At least **10-15 records** per hospital-metric combination for basic forecasting.
         - At least **30+ records** per hospital-metric combination for more reliable forecasting.
         """)
-
 
