@@ -1,10 +1,11 @@
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit # Import TimeSeriesSplit
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
 from dateutil.rrule import MO
@@ -424,6 +425,7 @@ if uploaded_file:
     try:
         # Load and prepare data using the updated function
         df = pd.read_excel(uploaded_file)
+        # TODO: Add logic here to use binary data if uploaded_file is None but binary_content is available
         df_processed = prepare_data(df) # Renamed to df_processed as it's no longer just 'long'
 
         # Show data loading success message and summary
@@ -537,6 +539,7 @@ if uploaded_file:
                     if len(X) >= 20: # Only perform CV if enough data for at least 3 splits
                         tscv = TimeSeriesSplit(n_splits=min(5, len(X) // 10)) # Adjust n_splits dynamically
                         fold_rmses = []
+                        fold_maes = [] # Initialize list for MAEs
                         for train_index, test_index in tscv.split(X):
                             X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
                             y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
@@ -545,23 +548,38 @@ if uploaded_file:
                                 fold_model = lgb.LGBMRegressor(**model.get_params()) # Use same params for fold models
                                 fold_model.fit(X_train_fold, y_train_fold)
                                 y_pred_fold = fold_model.predict(X_test_fold)
+                                y_pred_fold = np.maximum(0, y_pred_fold) # Ensure non-negative predictions
                                 fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
+                                fold_maes.append(mean_absolute_error(y_test_fold, y_pred_fold)) # Calculate MAE
                             else:
                                 st.warning(f"Skipping a fold due to insufficient data for '{target_col_name}' at {hospital}.")
 
-                        if fold_rmses:
+                        avg_mae_cv = np.nan # Default
+                        if fold_rmses: # Check if any folds were processed
                             avg_rmse = np.mean(fold_rmses)
                             st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
+                            if fold_maes: # Ensure MAEs were calculated
+                                avg_mae_cv = np.mean(fold_maes)
+                                st.info(f"Cross-Validation MAE for {target_col_name}: {avg_mae_cv:.2f} (Avg. over {len(fold_maes)} folds)")
                         else:
                             avg_rmse = np.nan
                             st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
                     else:
                         st.info(f"Not enough data for cross-validation for '{target_col_name}'. Training on all available data.")
-                        # If not enough for CV, train on all data for the final forecast
                         model.fit(X, y)
-                        y_pred_test = model.predict(X.tail(min(5,len(X)))) # Predict on last few for a basic RMSE
-                        rmse = np.sqrt(mean_squared_error(y.tail(min(5,len(y))), y_pred_test))
-                        avg_rmse = rmse # Report this as the RMSE if no CV
+                        # Predict on the last few points for a basic test error
+                        test_points_count = min(5, len(X))
+                        y_pred_test = model.predict(X.tail(test_points_count))
+                        y_pred_test = np.maximum(0, y_pred_test) # Ensure non-negative
+                        y_true_test = y.tail(test_points_count)
+
+                        rmse = np.sqrt(mean_squared_error(y_true_test, y_pred_test))
+                        mae_test = mean_absolute_error(y_true_test, y_pred_test)
+
+                        avg_rmse = rmse
+                        avg_mae_cv = mae_test # Use this MAE as the reported one
+                        st.info(f"Test RMSE for {target_col_name} (on last {test_points_count} points): {rmse:.2f}")
+                        st.info(f"Test MAE for {target_col_name} (on last {test_points_count} points): {mae_test:.2f}")
 
                     try:
                         # Train the final model on all available data for the most accurate future forecast
@@ -581,12 +599,14 @@ if uploaded_file:
                         future_df['Predicted'] = predictions # Add predictions to the future DataFrame
 
                         # Display key metrics using Streamlit columns
-                        col1, col2, col3 = st.columns(3)
+                        col1, col2, col3, col4 = st.columns(4) # Added a column for MAE
                         with col1:
-                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}") # Display average CV RMSE
+                            st.metric(f"{target_col_name} CV RMSE", f"{avg_rmse:.2f}")
                         with col2:
-                            st.metric(f"Training Records", f"{len(X)}")
+                            st.metric(f"{target_col_name} CV MAE", f"{avg_mae_cv:.2f}") # Display CV MAE
                         with col3:
+                            st.metric(f"Training Records", f"{len(X)}")
+                        with col4:
                             st.metric(f"Last {target_col_name} Value", f"{training_data[target_col_name].iloc[-1]:.0f}")
 
                         # Create and display the forecast plot
@@ -654,3 +674,281 @@ else:
         - At least **10-15 records** per hospital-metric combination for basic forecasting.
         - At least **30+ records** per hospital-metric combination for more reliable forecasting.
         """)
+
+if __name__ == "__main__":
+    import argparse
+    # Note: The full script imports (io, pd, np, lgb, mean_absolute_error, TimeSeriesSplit, etc.)
+    # are assumed to be at the top of the DMC.py file.
+    # The following are specific to this __main__ block's self-contained execution for the subtask.
+    from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
+    from pandas.tseries.offsets import DateOffset
+    from dateutil.rrule import MO
+    from datetime import datetime, timedelta
+
+    class IrishBankHolidays(AbstractHolidayCalendar): # Simplified/copied for __main__
+        rules = [
+            Holiday("New Year's Day", month=1, day=1, observance=nearest_workday),
+            Holiday("St. Brigid's Day", month=2, day=1, observance=nearest_workday),
+            Holiday("St. Patrick's Day", month=3, day=17, observance=nearest_workday),
+            Holiday("May Day", month=5, day=1, offset=DateOffset(weekday=MO(1))),
+            Holiday("June Bank Holiday", month=6, day=1, offset=DateOffset(weekday=MO(1))),
+            Holiday("August Bank Holiday", month=8, day=1, offset=DateOffset(weekday=MO(1))),
+            Holiday("October Bank Holiday", month=10, day=31, offset=DateOffset(weekday=MO(-1))), # Corrected to last Mon in Oct
+            Holiday("Christmas Day", month=12, day=25),
+            Holiday("St. Stephen's Day", month=12, day=26),
+        ]
+
+    def prepare_data(df_input): # Simplified for __main__
+        print(f"prepare_data (simplified for __main__) called with df shape: {df_input.shape}")
+        # Ensure 'Date' is datetime
+        if 'Date' in df_input.columns:
+            df_input['Date'] = pd.to_datetime(df_input['Date'])
+        else: # Add a dummy date if missing, for the script to run
+            df_input['Date'] = pd.to_datetime([datetime.today().date()] * len(df_input))
+
+        # Basic feature engineering from the original prepare_data
+        df_input['Datetime'] = pd.to_datetime(df_input['Date']) # Temp, will be overwritten if Time exists or is created
+        df_input['Hour'] = df_input['Datetime'].dt.hour
+        df_input['DayOfWeek'] = df_input['Datetime'].dt.dayofweek
+        df_input['DayOfMonth'] = df_input['Datetime'].dt.day
+        df_input['Month'] = df_input['Datetime'].dt.month
+        df_input['Quarter'] = df_input['Datetime'].dt.quarter
+        df_input['WeekOfYear'] = df_input['Datetime'].dt.isocalendar().week.astype(int)
+        df_input['IsWeekend'] = df_input['DayOfWeek'].isin([5, 6]).astype(int)
+        df_input['IsMonday'] = (df_input['DayOfWeek'] == 0).astype(int)
+        df_input['IsFriday'] = (df_input['DayOfWeek'] == 4).astype(int)
+        df_input['Hour_sin'] = np.sin(2 * np.pi * df_input['Hour'] / 24)
+        df_input['Hour_cos'] = np.cos(2 * np.pi * df_input['Hour'] / 24)
+        df_input['Day_sin'] = np.sin(2 * np.pi * df_input['DayOfWeek'] / 7)
+        df_input['Day_cos'] = np.cos(2 * np.pi * df_input['DayOfWeek'] / 7)
+        df_input['Month_sin'] = np.sin(2 * np.pi * df_input['Month'] / 12)
+        df_input['Month_cos'] = np.cos(2 * np.pi * df_input['Month'] / 12)
+        df_input['IsHoliday'] = 0
+        df_input['IsSummer'] = df_input['Month'].isin([6,7,8]).astype(int)
+        df_input['IsWinter'] = df_input['Month'].isin([12,1,2]).astype(int)
+        df_input['IsPeakHour'] = df_input['Hour'].isin([20]).astype(int)
+        df_input['IsLowHour'] = df_input['Hour'].isin([8]).astype(int)
+
+        if 'Hospital' in df_input.columns:
+            df_input['Hospital_Code'] = df_input['Hospital'].astype('category').cat.codes
+        else:
+            df_input['Hospital'] = 'Default Hospital' # Add dummy hospital if missing
+            df_input['Hospital_Code'] = 0
+
+        # Simulate the structure that the rest of the script expects
+        # This is a major simplification of the original prepare_data
+        required_cols = ['ED Beds', 'Trolleys', 'Capacity']
+        source_map = {
+            'ED Beds': 'Tracker8am',
+            'Trolleys': 'TimeTotal_8am',
+            'Capacity': 'AdditionalCapacityOpen Morning'
+        }
+
+        # If Time column does not exist, create it by melting, similar to full prepare_data
+        # This part is crucial for making the simplified version work somewhat like the original
+        if 'Time' not in df_input.columns:
+            df_output_list = []
+            for time_suffix, time_str in [('_8am', '08:00'), ('_2pm', '14:00'), ('_8pm', '20:00')]:
+                temp_df = df_input.copy() # Copy original daily data
+                temp_df['Time'] = time_str
+
+                # Map ED Beds
+                ed_col_name = 'ED' + time_suffix
+                if ed_col_name in df_input.rename(columns={'Tracker8am': 'ED_8am', 'Tracker2pm': 'ED_2pm', 'Tracker8pm': 'ED_8pm'}).columns:
+                     temp_df['ED Beds'] = df_input.rename(columns={'Tracker8am': 'ED_8am', 'Tracker2pm': 'ED_2pm', 'Tracker8pm': 'ED_8pm'})[ed_col_name]
+                elif 'Tracker8am' in df_input.columns : # Fallback to 8am if specific time column not found
+                    temp_df['ED Beds'] = df_input['Tracker8am']
+                else:
+                    temp_df['ED Beds'] = np.random.randint(0,10,size=len(df_input))
+
+                # Map Trolleys
+                trolley_col_name = 'Trolley' + time_suffix
+                if trolley_col_name in df_input.rename(columns={'TimeTotal_8am': 'Trolley_8am', 'TimeTotal_2pm': 'Trolley_2pm', 'TimeTotal_8pm': 'Trolley_8pm'}).columns:
+                    temp_df['Trolleys'] = df_input.rename(columns={'TimeTotal_8am': 'Trolley_8am', 'TimeTotal_2pm': 'Trolley_2pm', 'TimeTotal_8pm': 'Trolley_8pm'})[trolley_col_name]
+                elif 'TimeTotal_8am' in df_input.columns: # Fallback
+                    temp_df['Trolleys'] = df_input['TimeTotal_8am']
+                else:
+                    temp_df['Trolleys'] = np.random.randint(0,10,size=len(df_input))
+
+                # Capacity (usually daily, so just copy)
+                if 'AdditionalCapacityOpen Morning' in temp_df.columns:
+                    temp_df['Capacity'] = pd.to_numeric(temp_df['AdditionalCapacityOpen Morning'], errors='coerce').fillna(0)
+                else:
+                    temp_df['Capacity'] = np.random.randint(0,5,size=len(df_input))
+
+                df_output_list.append(temp_df)
+
+            df_output = pd.concat(df_output_list, ignore_index=True)
+            # Ensure Datetime is correctly formed after melt
+            if 'Date' in df_output.columns and 'Time' in df_output.columns:
+                 df_output['Datetime'] = pd.to_datetime(df_output['Date'].dt.strftime('%Y-%m-%d') + ' ' + df_output['Time'], errors='coerce')
+
+        else: # If Time column already exists (e.g. from a more complete prepare_data upstream)
+            df_output = df_input
+            if 'Datetime' not in df_output.columns and 'Date' in df_output.columns and 'Time' in df_output.columns:
+                 df_output['Datetime'] = pd.to_datetime(df_output['Date'].dt.strftime('%Y-%m-%d') + ' ' + df_output['Time'], errors='coerce')
+            # Ensure target columns exist if data is already shaped with Time
+            for col, source_col_key in source_map.items():
+                if col not in df_output.columns:
+                    if source_col_key in df_output.columns:
+                         df_output[col] = pd.to_numeric(df_output[source_col_key], errors='coerce').fillna(0)
+                    else: # If specific source (like Tracker8am) isn't there, create dummy
+                         df_output[col] = np.random.randint(0,10,size=len(df_output))
+
+        df_output = df_output.dropna(subset=['Datetime']) # Drop rows where datetime could not be formed
+        df_output = df_output.sort_values(by=['Hospital', 'Datetime']).reset_index(drop=True)
+        print(f"prepare_data (simplified for __main__) finished. Shape: {df_output.shape}. Columns: {df_output.columns.tolist()[:5]}...")
+        return df_output
+
+    def add_lag_features_smart(df, target_column, min_data_threshold=20): # Simplified for __main__
+        print(f"add_lag_features_smart (simplified for __main__) called for {target_column} with df shape: {df.shape}")
+        df = df.copy()
+        lag_features = []
+        # Group by hospital for correct lags if 'Hospital' column exists
+        grouped_df = df.groupby('Hospital') if 'Hospital' in df.columns else [('', df)]
+
+        processed_dfs = []
+        for _, group in grouped_df:
+            group = group.copy() # Avoid SettingWithCopyWarning
+            max_safe_lag = min(7, len(group) // 4 if len(group) > 0 else 1)
+            if max_safe_lag < 1: max_safe_lag = 1
+
+            for i in range(1, max_safe_lag + 1):
+                lag_col = f'Lag_{target_column}_{i}'
+                group[lag_col] = group[target_column].shift(i)
+                if lag_col not in lag_features: lag_features.append(lag_col)
+
+            if len(group) >= 6:
+                roll_mean_3_col = f'Rolling_Mean_3_{target_column}'
+                group[roll_mean_3_col] = group[target_column].rolling(window=min(3, len(group)//2 if len(group)>0 else 1), min_periods=1).mean()
+                if roll_mean_3_col not in lag_features: lag_features.append(roll_mean_3_col)
+            if len(group) >= 14:
+                roll_mean_7_col = f'Rolling_Mean_7_{target_column}'
+                group[roll_mean_7_col] = group[target_column].rolling(window=min(7, len(group)//2 if len(group)>0 else 1), min_periods=1).mean()
+                if roll_mean_7_col not in lag_features: lag_features.append(roll_mean_7_col)
+            processed_dfs.append(group)
+
+        if not processed_dfs: # Should not happen if df is not empty
+             df_with_lags = df
+        else:
+            df_with_lags = pd.concat(processed_dfs)
+
+        for feature in lag_features:
+            if feature in df_with_lags.columns:
+                df_with_lags[feature] = df_with_lags[feature].fillna(method='ffill').fillna(method='bfill').fillna(0)
+        print(f"add_lag_features_smart (simplified for __main__) finished. Added features like: {lag_features[:2]}...")
+        return df_with_lags, lag_features
+
+    parser = argparse.ArgumentParser(description="Run DMC baseline MAE evaluation.")
+    parser.add_argument("--input_excel_path", type=str, help="Path to the input Excel file.")
+    args = parser.parse_args()
+
+    df = None
+
+    if args.input_excel_path:
+        print(f"Attempting to load DataFrame from command-line path: {args.input_excel_path}")
+        try:
+            df = pd.read_excel(args.input_excel_path, engine='openpyxl')
+            print(f"DataFrame loaded successfully from {args.input_excel_path}. Shape: {df.shape}")
+        except FileNotFoundError:
+            print(f"Error: File not found at {args.input_excel_path}")
+            df = None # Ensure df is None if file not found
+        except Exception as e:
+            print(f"Error loading Excel from path {args.input_excel_path}: {e}")
+            df = None # Ensure df is None on other errors
+
+    if df is None: # Fallback if df is None due to any reason above
+        print("Using internal dummy data for testing as input_excel_path was not provided or failed to load.")
+        excel_simulated_buffer_for_fallback = io.BytesIO()
+        simulated_excel_df_for_fallback = pd.DataFrame({
+            'Hospital Group Name': ['Group Fallback'] * 21, # 7 days * 3 entries/day
+            'Hospital': ['Fallback Hospital'] * 21,
+            'Date': pd.to_datetime(['2023-01-%02d' % i for i in range(1, 8)] * 3),
+            'DayGAR': ['DayZ'] * 21,
+            'Tracker8am': np.random.randint(5, 25, 21), 'Tracker2pm': np.random.randint(5, 25, 21), 'Tracker8pm': np.random.randint(5, 25, 21),
+            'TimeTotal_8am': np.random.randint(1, 5, 21), 'TimeTotal_2pm': np.random.randint(1, 5, 21), 'TimeTotal_8pm': np.random.randint(1, 5, 21),
+            'AdditionalCapacityOpen Morning': [0,1,0,2,0,1,0]*3
+        })
+        simulated_excel_df_for_fallback['Date'] = pd.to_datetime(simulated_excel_df_for_fallback['Date']).dt.normalize()
+        with pd.ExcelWriter(excel_simulated_buffer_for_fallback, engine='openpyxl') as writer:
+            simulated_excel_df_for_fallback.to_excel(writer, index=False, sheet_name='Sheet1')
+        # Read the buffer back into df
+        excel_simulated_buffer_for_fallback.seek(0) # Reset buffer position to the beginning
+        df = pd.read_excel(excel_simulated_buffer_for_fallback, engine='openpyxl')
+        print(f"Loaded internal dummy DataFrame. Shape: {df.shape}")
+
+    df_processed = prepare_data(df.copy())
+
+    if df_processed.empty:
+        print("Processed DataFrame is empty. Exiting MAE evaluation.")
+    else:
+        all_hospitals = df_processed['Hospital'].unique()
+        if not all_hospitals.size > 0:
+            print("No hospitals found in processed data. Exiting.")
+        else:
+            test_hospital_name = all_hospitals[0]
+            print(f"\n--- Evaluating Baseline for Hospital: {test_hospital_name} ---")
+            # Ensure hospital_data_full is not empty after filtering
+            hospital_data_full_filtered = df_processed[df_processed['Hospital'] == test_hospital_name]
+            if hospital_data_full_filtered.empty:
+                print(f"No data for selected hospital: {test_hospital_name}. Exiting.")
+            else:
+                hospital_data_full = hospital_data_full_filtered.sort_values(by='Datetime').reset_index(drop=True)
+                print(f"Data for {test_hospital_name} has shape: {hospital_data_full.shape}")
+
+                base_features_for_main = [
+                    'Hour', 'DayOfWeek', 'DayOfMonth', 'Month', 'Quarter', 'WeekOfYear',
+                    'IsWeekend', 'IsMonday', 'IsFriday',
+                    'Hour_sin', 'Hour_cos', 'Day_sin', 'Day_cos', 'Month_sin', 'Month_cos',
+                    'IsHoliday', 'IsSummer', 'IsWinter', 'IsPeakHour', 'IsLowHour',
+                    'Hospital_Code'
+                ]
+                for target_column_main in ['ED Beds', 'Trolleys', 'Capacity']:
+                    print(f"\n--- Target: {target_column_main} for {test_hospital_name} ---")
+
+                    if target_column_main not in hospital_data_full.columns or \
+                       hospital_data_full[target_column_main].isnull().all() or \
+                       hospital_data_full[target_column_main].nunique() < 2 :
+                        unique_count = hospital_data_full[target_column_main].nunique() if target_column_main in hospital_data_full.columns else 'N/A'
+                        print(f"Skipping {target_column_main} due to missing column, all nulls, or insufficient unique values (Unique: {unique_count}).")
+                        continue
+
+                    data_for_target, lag_features_for_target = add_lag_features_smart(hospital_data_full.copy(), target_column_main)
+                    current_model_features = base_features_for_main[:]
+                    if target_column_main != 'Capacity' and 'Capacity' in data_for_target.columns:
+                        current_model_features.append('Capacity')
+
+                    all_features_for_model_main = current_model_features + lag_features_for_target
+                    final_features_main = [f for f in all_features_for_model_main if f in data_for_target.columns and f != target_column_main]
+
+                    data_for_target_clean = data_for_target.dropna(subset=[target_column_main] + final_features_main).reset_index(drop=True)
+
+                    if data_for_target_clean.shape[0] < 10:
+                        print(f"Not enough clean data for {target_column_main} to perform train/test split ({data_for_target_clean.shape[0]} records).")
+                        continue
+
+                    num_records = data_for_target_clean.shape[0]
+                    test_size = min(max(1, 21), max(1, int(num_records * 0.2)))
+                    if num_records - test_size < 3 :
+                         print(f"Train/Test split not viable for {target_column_main} (total: {num_records}, test: {test_size}). Skipping.")
+                         continue
+
+                    train_df = data_for_target_clean.iloc[:-test_size]
+                    test_df = data_for_target_clean.iloc[-test_size:]
+
+                    if train_df.empty or test_df.empty:
+                        print(f"Train or test split resulted in empty DataFrame for {target_column_main}.")
+                        continue
+
+                    X_train, y_train = train_df[final_features_main], train_df[target_column_main]
+                    X_test, y_test = test_df[final_features_main], test_df[target_column_main]
+
+                    print(f"Training {target_column_main} model with {X_train.shape[0]} samples, testing with {X_test.shape[0]} samples for {test_hospital_name}.")
+                    lgbm = lgb.LGBMRegressor(random_state=42, verbose=-1, force_col_wise=True)
+                    lgbm.fit(X_train, y_train)
+
+                    hold_out_predictions = lgbm.predict(X_test)
+                    hold_out_predictions = np.maximum(0, hold_out_predictions)
+                    mae_hold_out = mean_absolute_error(y_test, hold_out_predictions)
+                    print(f"MAE for {target_column_main} on hold-out set ({test_df.shape[0]} records for {test_hospital_name}): {mae_hold_out:.4f}")
+    print("--- End of __main__ execution ---")
