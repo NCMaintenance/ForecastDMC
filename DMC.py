@@ -5,8 +5,8 @@ import numpy as np
 import lightgbm as lgb
 import xgboost as xgb
 import catboost as cb
-from sklearn.ensemble import GradientBoostingRegressor # A good scikit-learn equivalent
-from prophet import Prophet # Import Prophet
+from sklearn.ensemble import GradientBoostingRegressor
+from prophet import Prophet
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV # ADDED RandomizedSearchCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error # Import MAE for calculation
@@ -111,7 +111,14 @@ def prepare_data(df):
     # Rename 'Additional_Capacity' to 'Capacity' to match the desired output
     df_merged = df_merged.rename(columns={'Additional_Capacity': 'Capacity'})
 
+    # FIX: Ensure 'Date' column is converted to string consistently before concatenation
+    # This handles various Excel date representations (datetime objects, floats as serials)
+    # and prevents the "'int' object has no attribute 'astype'" error.
+    df_merged['Date'] = pd.to_datetime(df_merged['Date'], errors='coerce') # Convert to datetime, coerce errors
+    df_merged['Date'] = df_merged['Date'].dt.strftime('%Y-%m-%d').fillna('') # Format as string and fill NaNs with empty string
+    
     # Create a unified Datetime column for time-series analysis
+    # After the fix above, df_merged['Date'] is guaranteed to be string-like
     df_merged['Datetime'] = pd.to_datetime(df_merged['Date'].astype(str) + ' ' + df_merged['Time'])
     # Sort the data by Hospital and Datetime, which is crucial for time-series operations like lags
     df_merged = df_merged.sort_values(by=['Hospital', 'Datetime']).reset_index(drop=True)
@@ -255,10 +262,10 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
                 pass
 
             # Seasonal and peak hour indicators
-            is_summer = int(month in [6, 7, 8]).astype(int)
-            is_winter = int(month in [12, 1, 2]).astype(int)
-            is_peak_hour = int(hour == 20).astype(int)
-            is_low_hour = int(hour == 8).astype(int)
+            is_summer = int(month in [6, 7, 8])
+            is_winter = int(month in [12, 1, 2])
+            is_peak_hour = int(hour == 20)
+            is_low_hour = int(hour == 8)
 
             # Append all calculated features for the current future timestamp
             future_dates.append({
@@ -515,98 +522,58 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
 
     # Define base model parameters and tuning grid for residual model
     residual_model_params = {}
-    residual_param_grid = {'residual_weight': [0.8, 1.0, 1.2]} # Default range for tuning the weight
-
+    
     if residual_model_name == 'LightGBM':
         residual_model_class = lgb.LGBMRegressor
-        residual_model_params = {
+        base_residual_params = {
             'n_estimators': min(500, len(X_ml_res) * 2), 'learning_rate': 0.03, 'num_leaves': 20,
             'max_depth': -1, 'min_child_samples': 10, 'subsample': 0.7, 'colsample_bytree': 0.7,
             'random_state': 42, 'n_jobs': -1, 'objective': 'regression_l1'
         }
         if enable_tuning:
-            residual_param_grid.update({
+            residual_param_grid = {
                 'n_estimators': [100, 250, 500],
                 'learning_rate': [0.01, 0.03, 0.05],
-                'num_leaves': [15, 20, 31]
-            })
+                'num_leaves': [15, 20, 31],
+                'max_depth': [-1, 10], 
+                'subsample': [0.7, 0.8],
+                'colsample_bytree': [0.7, 0.8]
+            }
+        else:
+            residual_model_params = base_residual_params
+
     elif residual_model_name == 'CatBoost':
         residual_model_class = cb.CatBoostRegressor
-        residual_model_params = {
+        base_residual_params = {
             'iterations': min(500, len(X_ml_res) * 2), 'learning_rate': 0.03, 'depth': 5,
             'subsample': 0.7, 'colsample_bylevel': 0.7, 'l2_leaf_reg': 2,
             'verbose': False, 'random_state': 42, 'allow_writing_files': False,
             'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 20, 'loss_function': 'MAE'
         }
         if enable_tuning:
-            residual_param_grid.update({
+            residual_param_grid = {
                 'iterations': [100, 250, 500],
                 'learning_rate': [0.01, 0.03, 0.05],
-                'depth': [4, 5, 6]
-            })
+                'depth': [4, 5, 6],
+                'l2_leaf_reg': [1, 2, 3]
+            }
+        else:
+            residual_model_params = base_residual_params
     else:
         st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
         return predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM', enable_tuning=enable_tuning, tuning_iterations=tuning_iterations) # Fallback
 
 
     # Perform tuning for the residual model if enabled
+    tuned_residual_weight = 1.0 # Default fixed weight for residuals
+    
     if enable_tuning and len(X_ml_res) >= 20: # Ensure enough data for tuning residuals
         st.info(f"🚀 Starting Hyperparameter Tuning for {residual_model_name} residuals with {tuning_iterations} iterations...")
-        tscv_res_tuning = TimeSeriesSplit(n_splits=min(5, max(2, len(X_ml_res) // 10)))
-        
-        # We need a wrapper to optimize `residual_weight` along with model params
-        # For simplicity in this implementation, we will tune the model parameters
-        # and then apply a fixed `residual_weight` or a default 1.0 if not tuned.
-        # To tune 'residual_weight' as part of RandomizedSearchCV, it needs to be a parameter
-        # that the estimator consumes. A custom estimator would be ideal.
-        # For now, let's include 'residual_weight' in the RandomizedSearchCV of the residual model
-        # and interpret it as an additional feature or a post-processing step during prediction.
-
-        # Let's create a simple "meta" estimator for the hybrid to tune the weight.
-        # This is a bit of a hack but gets the job done for tuning the weight.
-        class ResidualModelWrapper:
-            def __init__(self, model_class, base_params, residual_weight=1.0):
-                self.model = model_class(**base_params)
-                self.residual_weight = residual_weight
-
-            def fit(self, X, y):
-                self.model.fit(X, y)
-                return self
-
-            def predict(self, X):
-                return self.model.predict(X) * self.residual_weight
-
-            def get_params(self, deep=True):
-                # Expose residual_weight as a tunable parameter
-                params = self.model.get_params(deep=deep)
-                params['residual_weight'] = self.residual_weight
-                return params
-
-            def set_params(self, **params):
-                if 'residual_weight' in params:
-                    self.residual_weight = params.pop('residual_weight')
-                self.model.set_params(**params)
-                return self
-
-        # Update param_grid to include model-specific params + residual_weight
-        # For RandomizedSearchCV, parameters must be directly consumed by the estimator
-        # So we'll pass the residual_weight as a dummy parameter to the model, or
-        # use a more robust custom estimator for complex tuning.
-        # A simpler way for this context: just tune the residual model itself,
-        # and apply a fixed or external weight post-tuning, or pick best weight from a fixed list.
-
-        # Let's revert to a simpler tuning for now: only tuning the residual model itself,
-        # and keeping the `residual_weight` as 1.0 (or fixed from a small list) for simplicity
-        # because full wrapper is too complex for this iterative change.
-        
-        # Let's go with the initial thought: define a fixed set of residual_weights to try.
-        # And tune the residual model parameters only.
-        
-        residual_model_to_tune = residual_model_class(**residual_model_params)
+        tscv_res_tuning = TimeSeriesSplit(n_splits=min(5, max(2, len(X_ml_res) // 10))) # At least 2 splits for tuning
         
         random_search_res = RandomizedSearchCV(
-            estimator=residual_model_to_tune,
-            param_distributions=residual_param_grid, # Use updated grid from above
+            estimator=residual_model_class(**base_residual_params), # Use base params as a starting point for estimator
+            param_distributions=residual_param_grid, 
             n_iter=tuning_iterations,
             scoring='neg_root_mean_squared_error', # Optimize residual prediction for RMSE
             cv=tscv_res_tuning,
@@ -616,9 +583,6 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         )
         random_search_res.fit(X_ml_res, y_ml_res)
         ml_residual_model = random_search_res.best_estimator_
-        tuned_residual_weight = 1.0 # Default if not explicitly tuned as part of model params
-        if 'residual_weight' in random_search_res.best_params_: # Check if it was tuned
-            tuned_residual_weight = random_search_res.best_params_['residual_weight']
         
         st.success(f"✅ Residual model tuning complete. Best parameters for {residual_model_name} residuals: {random_search_res.best_params_}")
         st.info(f"Best CV RMSE for residual model during tuning: {-random_search_res.best_score_:.2f}")
@@ -629,7 +593,6 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         # Train residual model with default parameters if no tuning
         ml_residual_model = residual_model_class(**residual_model_params)
         ml_residual_model.fit(X_ml_res, y_ml_res)
-        tuned_residual_weight = 1.0 # Default if not tuned
 
 
     # --- Step 3: Forecast future with hybrid model ---
@@ -692,7 +655,8 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             predicted_residuals.append(0)
 
     # Final hybrid prediction = Prophet base + ML residual prediction * tuned_residual_weight
-    hybrid_predictions = future_prophet_forecast['yhat'].values + (np.array(predicted_residuals) * tuned_residual_weight)
+    # For simplicity, residual_weight is fixed at 1.0 here unless a custom tuning approach is added.
+    hybrid_predictions = future_prophet_forecast['yhat'].values + (np.array(predicted_residuals) * tuned_residual_weight) # Using the default 1.0 or tuned weight if applicable
     hybrid_predictions = np.maximum(0, hybrid_predictions).round(0)
 
     return pd.DataFrame({
@@ -800,10 +764,10 @@ def add_forecasting_insights():
 
         st.subheader("Understanding Your Results")
         st.markdown("""
-        * **RMSE (Root Mean Square Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions.
+        * **RMSE (Root Mean Square Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions. For Prophet and Hybrid models, this is the RMSE of the Prophet component on historical data, providing a base accuracy measure.
         * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
         * **Validation**: The model's performance (RMSE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
-        * **Prediction Intervals (Forecast Low/High)**: These provide a range within which the true value is expected to fall. For Prophet and Hybrid models, these come from Prophet's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
+        * **Prediction Intervals (Forecast Low/High)**: These provide a range within which the true value is expected to fall. For Prophet and Hybrid models, these directly come from Prophet's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
         """)
 
 @st.cache_resource # Cache the trained model for faster subsequent runs
@@ -936,15 +900,19 @@ model_option = st.sidebar.selectbox(
 
 # Hyperparameter Tuning options
 st.sidebar.subheader("Hyperparameter Tuning")
-enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
-    help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
-tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
-    help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
+# Conditionally enable tuning checkbox based on model selection
+is_tree_model = model_option in ["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)"]
+is_hybrid_model = model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]
 
-# Display warning if tuning is enabled for non-tree models
-if model_option in ["Prophet"] and enable_tuning: # Prophet doesn't use RandomizedSearchCV here
-    st.sidebar.warning("Hyperparameter tuning is not available for Prophet via this interface. It has its own internal cross-validation.")
-    enable_tuning = False # Disable tuning for Prophet
+if is_tree_model or is_hybrid_model:
+    enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
+        help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
+    tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
+        help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
+else: # Prophet standalone
+    enable_tuning = False # Disable tuning for Prophet standalone
+    st.sidebar.markdown("_Tuning is not applicable for Prophet standalone model via this interface._")
+    tuning_iterations = 0 # No iterations needed
 
 # File uploader widget
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
@@ -1114,8 +1082,9 @@ if uploaded_file:
 
                                         if len(X_train_fold) > 0 and len(X_test_fold) > 0:
                                             # Create a fresh model for each fold (not cached for folds)
-                                            fold_model = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0)
-                                            y_pred_fold = fold_model.predict(X_test_fold)
+                                            # Ensure get_ml_model returns a *fitted* model here for fold evaluation
+                                            fold_model_instance = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0)
+                                            y_pred_fold = fold_model_instance.predict(X_test_fold)
                                             y_pred_fold = np.maximum(0, y_pred_fold).round(0)
                                             fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
                                         else:
