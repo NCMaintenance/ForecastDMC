@@ -481,7 +481,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         )
     elif residual_model_name == 'CatBoost':
         ml_residual_model = cb.CatBoostRegressor(
-            iterations=min(500, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
+            iterations=min(1000, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
             subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
             verbose=False, random_state=42, allow_writing_files=False,
             bagging_temperature=1, od_type='Iter', od_wait=20, loss_function='RMSE'
