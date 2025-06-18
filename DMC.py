@@ -653,4 +653,4 @@ else:
         - Data for multiple hospitals (optional, but the app supports it).
         - At least **10-15 records** per hospital-metric combination for basic forecasting.
         - At least **30+ records** per hospital-metric combination for more reliable forecasting.
-        """) is 
+        """) 
