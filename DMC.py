@@ -456,7 +456,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series):
     """
     if model_name == "CatBoost":
         model = cb.CatBoostRegressor(
-            iterations=min(1000, len(X_train) * 3), # Dynamic iterations, capped at 1000
+            iterations=min(3000, len(X_train) * 3), # Dynamic iterations, capped at 1000
             learning_rate=0.08,
             depth=6,
             subsample=0.8,
@@ -472,7 +472,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series):
         )
     elif model_name == "LightGBM":
         model = lgb.LGBMRegressor(
-            n_estimators=min(1000, len(X_train) * 3), # Dynamic estimators, capped
+            n_estimators=min(300, len(X_train) * 3), # Dynamic estimators, capped
             learning_rate=0.05,
             num_leaves=31,
             max_depth=-1, # No limit
@@ -485,7 +485,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series):
         )
     elif model_name == "XGBoost":
         model = xgb.XGBRegressor(
-            n_estimators=min(1000, len(X_train) * 3), # Dynamic estimators, capped
+            n_estimators=min(500, len(X_train) * 3), # Dynamic estimators, capped
             learning_rate=0.05,
             max_depth=6,
             subsample=0.8,
@@ -496,8 +496,8 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series):
         )
     elif model_name == "GradientBoosting (Scikit-learn)":
         model = GradientBoostingRegressor(
-            n_estimators=min(500, len(X_train) * 2), # Fewer estimators for GB
-            learning_rate=0.1,
+            n_estimators=min(1000, len(X_train) * 2), # Fewer estimators for GB
+            learning_rate=0.01,
             max_depth=5,
             subsample=0.8,
             random_state=42,
