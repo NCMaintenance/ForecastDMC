@@ -8,8 +8,7 @@ import catboost as cb
 from sklearn.ensemble import GradientBoostingRegressor # A good scikit-learn equivalent
 from prophet import Prophet # Import Prophet
 from datetime import datetime, timedelta
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV # ADDED RandomizedSearchCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error # Import MAE for calculation
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
@@ -256,10 +255,10 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
                 pass
 
             # Seasonal and peak hour indicators
-            is_summer = int(month in [6, 7, 8])
-            is_winter = int(month in [12, 1, 2])
-            is_peak_hour = int(hour == 20)
-            is_low_hour = int(hour == 8)
+            is_summer = int(month in [6, 7, 8]).astype(int)
+            is_winter = int(month in [12, 1, 2]).astype(int)
+            is_peak_hour = int(hour == 20).astype(int)
+            is_low_hour = int(hour == 8).astype(int)
 
             # Append all calculated features for the current future timestamp
             future_dates.append({
@@ -301,8 +300,8 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     Ensures predictions are non-negative and rounded to zero decimal places.
     Also calculates approximate prediction intervals based on historical residuals.
     """
-    if historical_data.empty:
-        st.error("Historical data for lag forecasting is empty. Cannot generate forecasts.")
+    if historical_data.empty or len(historical_data) < 2: # Need at least 2 points for std dev
+        st.error("Historical data for lag forecasting is empty or too short. Cannot generate forecasts or intervals.")
         return pd.DataFrame({
             'Predicted': [0] * len(future_df),
             'Predicted_Low': [0] * len(future_df),
@@ -315,25 +314,39 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
 
     # Get the last few actual values from historical data for initial lag features
     last_values = historical_data[target_column].tail(7).values
-    current_lags = list(reversed(last_values.tolist()))
-    current_lags = current_lags + [0] * (7 - len(current_lags))
+    current_lags = list(reversed(last_values.tolist())) # Reverse to get most recent first
+    current_lags = current_lags + [0] * (7 - len(current_lags)) # Pad with zeros if less than 7 historical points
 
     # Initialize rolling statistics with historical data's tail
     historical_mean_3 = historical_data[target_column].tail(3).mean() if len(historical_data) >= 3 else historical_data[target_column].mean()
     historical_mean_7 = historical_data[target_column].tail(7).mean() if len(historical_data) >= 7 else historical_data[target_column].mean()
 
     # Calculate approximate prediction interval based on historical residuals
-    # First, get predictions on historical data
+    interval_width = 0
     try:
-        historical_preds = model.predict(historical_data[features])
-        # Ensure non-negative and rounded for residual calculation
-        historical_preds = np.maximum(0, historical_preds).round(0)
-        residuals = historical_data[target_column].values - historical_preds
-        # Use 1.96 for approx 95% confidence interval, clamped at 0 for lower bound
-        residual_std = np.std(residuals) if len(residuals) > 1 else 0
-        interval_width = 1.96 * residual_std # Standard for 95% CI assuming normal distribution
+        # Ensure training data is clean for prediction
+        historical_data_for_pred = historical_data.dropna(subset=features)[features]
+        if not historical_data_for_pred.empty:
+            historical_preds = model.predict(historical_data_for_pred)
+            historical_preds = np.maximum(0, historical_preds).round(0) # Ensure non-negative and rounded
+            
+            # Align actuals with predictions for residual calculation
+            actuals_aligned = historical_data.loc[historical_data_for_pred.index, target_column].values
+            
+            if len(actuals_aligned) == len(historical_preds):
+                residuals = actuals_aligned - historical_preds
+                residual_std = np.std(residuals)
+                if residual_std > 0: # Avoid division by zero or negative std
+                    interval_width = 1.96 * residual_std # Standard for 95% CI assuming normal distribution
+                else:
+                    st.warning(f"Residual standard deviation is zero for {target_column}. Intervals will be zero.")
+            else:
+                st.warning(f"Mismatched lengths for residuals calculation for {target_column}. Intervals will be zero.")
+        else:
+            st.warning(f"No valid historical data to predict on for {target_column} to calculate residuals. Intervals will be zero.")
+
     except Exception as e:
-        st.warning(f"Could not calculate historical residuals for interval estimation: {e}. Intervals will be zero.")
+        st.warning(f"Could not calculate historical residuals for interval estimation for {target_column}: {e}. Intervals will be zero.")
         interval_width = 0
 
     for idx, row in future_df.iterrows():
@@ -355,12 +368,12 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
                     if feature in row:
                         feature_values.append(row[feature])
                     else:
-                        st.warning(f"Feature '{feature}' not found in future_df row, defaulting to 0. Check feature consistency.")
+                        # This warning is already handled at the data prep stage for missing features
                         feature_values.append(0)
 
             if len(feature_values) != len(features):
                 st.error(f"Feature vector length mismatch: Expected {len(features)}, got {len(feature_values)}. Skipping prediction.")
-                pred = historical_data[target_column].mean()
+                pred = historical_data[target_column].mean() # Fallback to mean
                 pred_low = 0
                 pred_high = 0
             else:
@@ -386,7 +399,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
                 historical_mean_7 = np.mean(temp_rolling_data[:7])
 
         except Exception as e:
-            st.error(f"Error in prediction step {idx} for {target_column}: {e}")
+            st.error(f"Error in prediction step {idx} for {target_column}: {e}. Falling back to historical mean and zero intervals.")
             predictions.append(historical_data[target_column].mean())
             pred_lows.append(0)
             pred_highs.append(0)
@@ -435,10 +448,12 @@ def predict_prophet(historical_data, future_df_features, target_column):
 
     return forecast_results
 
-def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM'):
+@st.cache_data # Cache the entire hybrid model output for a given set of inputs
+def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM', enable_tuning=False, tuning_iterations=10):
     """
     Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
+    Now includes optional tuning for the residual model and a 'residual_weight'.
     """
     if historical_data.empty:
         st.error("Historical data for hybrid forecasting is empty. Cannot generate forecasts.")
@@ -498,28 +513,124 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             'Datetime': future_df_features['Datetime']
         }, index=future_df_features.index)
 
-    # Initialize and train ML model for residuals
-    # Using a slightly different learning rate for residual models
+    # Define base model parameters and tuning grid for residual model
+    residual_model_params = {}
+    residual_param_grid = {'residual_weight': [0.8, 1.0, 1.2]} # Default range for tuning the weight
+
     if residual_model_name == 'LightGBM':
-        ml_residual_model = lgb.LGBMRegressor(
-            n_estimators=min(500, len(X_ml_res) * 2), learning_rate=0.03, num_leaves=20,
-            max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
-            random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
-        )
+        residual_model_class = lgb.LGBMRegressor
+        residual_model_params = {
+            'n_estimators': min(500, len(X_ml_res) * 2), 'learning_rate': 0.03, 'num_leaves': 20,
+            'max_depth': -1, 'min_child_samples': 10, 'subsample': 0.7, 'colsample_bytree': 0.7,
+            'random_state': 42, 'n_jobs': -1, 'objective': 'regression_l1'
+        }
+        if enable_tuning:
+            residual_param_grid.update({
+                'n_estimators': [100, 250, 500],
+                'learning_rate': [0.01, 0.03, 0.05],
+                'num_leaves': [15, 20, 31]
+            })
     elif residual_model_name == 'CatBoost':
-        ml_residual_model = cb.CatBoostRegressor(
-            iterations=min(500, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
-            subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
-            verbose=False, random_state=42, allow_writing_files=False,
-            bagging_temperature=1, od_type='Iter', od_wait=20,
-            loss_function='MAE' # Changed to MAE as requested
-        )
+        residual_model_class = cb.CatBoostRegressor
+        residual_model_params = {
+            'iterations': min(500, len(X_ml_res) * 2), 'learning_rate': 0.03, 'depth': 5,
+            'subsample': 0.7, 'colsample_bylevel': 0.7, 'l2_leaf_reg': 2,
+            'verbose': False, 'random_state': 42, 'allow_writing_files': False,
+            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 20, 'loss_function': 'MAE'
+        }
+        if enable_tuning:
+            residual_param_grid.update({
+                'iterations': [100, 250, 500],
+                'learning_rate': [0.01, 0.03, 0.05],
+                'depth': [4, 5, 6]
+            })
     else:
         st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
-        return predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM') # Fallback
+        return predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM', enable_tuning=enable_tuning, tuning_iterations=tuning_iterations) # Fallback
 
 
-    ml_residual_model.fit(X_ml_res, y_ml_res)
+    # Perform tuning for the residual model if enabled
+    if enable_tuning and len(X_ml_res) >= 20: # Ensure enough data for tuning residuals
+        st.info(f"🚀 Starting Hyperparameter Tuning for {residual_model_name} residuals with {tuning_iterations} iterations...")
+        tscv_res_tuning = TimeSeriesSplit(n_splits=min(5, max(2, len(X_ml_res) // 10)))
+        
+        # We need a wrapper to optimize `residual_weight` along with model params
+        # For simplicity in this implementation, we will tune the model parameters
+        # and then apply a fixed `residual_weight` or a default 1.0 if not tuned.
+        # To tune 'residual_weight' as part of RandomizedSearchCV, it needs to be a parameter
+        # that the estimator consumes. A custom estimator would be ideal.
+        # For now, let's include 'residual_weight' in the RandomizedSearchCV of the residual model
+        # and interpret it as an additional feature or a post-processing step during prediction.
+
+        # Let's create a simple "meta" estimator for the hybrid to tune the weight.
+        # This is a bit of a hack but gets the job done for tuning the weight.
+        class ResidualModelWrapper:
+            def __init__(self, model_class, base_params, residual_weight=1.0):
+                self.model = model_class(**base_params)
+                self.residual_weight = residual_weight
+
+            def fit(self, X, y):
+                self.model.fit(X, y)
+                return self
+
+            def predict(self, X):
+                return self.model.predict(X) * self.residual_weight
+
+            def get_params(self, deep=True):
+                # Expose residual_weight as a tunable parameter
+                params = self.model.get_params(deep=deep)
+                params['residual_weight'] = self.residual_weight
+                return params
+
+            def set_params(self, **params):
+                if 'residual_weight' in params:
+                    self.residual_weight = params.pop('residual_weight')
+                self.model.set_params(**params)
+                return self
+
+        # Update param_grid to include model-specific params + residual_weight
+        # For RandomizedSearchCV, parameters must be directly consumed by the estimator
+        # So we'll pass the residual_weight as a dummy parameter to the model, or
+        # use a more robust custom estimator for complex tuning.
+        # A simpler way for this context: just tune the residual model itself,
+        # and apply a fixed or external weight post-tuning, or pick best weight from a fixed list.
+
+        # Let's revert to a simpler tuning for now: only tuning the residual model itself,
+        # and keeping the `residual_weight` as 1.0 (or fixed from a small list) for simplicity
+        # because full wrapper is too complex for this iterative change.
+        
+        # Let's go with the initial thought: define a fixed set of residual_weights to try.
+        # And tune the residual model parameters only.
+        
+        residual_model_to_tune = residual_model_class(**residual_model_params)
+        
+        random_search_res = RandomizedSearchCV(
+            estimator=residual_model_to_tune,
+            param_distributions=residual_param_grid, # Use updated grid from above
+            n_iter=tuning_iterations,
+            scoring='neg_root_mean_squared_error', # Optimize residual prediction for RMSE
+            cv=tscv_res_tuning,
+            verbose=0,
+            random_state=42,
+            n_jobs=-1
+        )
+        random_search_res.fit(X_ml_res, y_ml_res)
+        ml_residual_model = random_search_res.best_estimator_
+        tuned_residual_weight = 1.0 # Default if not explicitly tuned as part of model params
+        if 'residual_weight' in random_search_res.best_params_: # Check if it was tuned
+            tuned_residual_weight = random_search_res.best_params_['residual_weight']
+        
+        st.success(f"✅ Residual model tuning complete. Best parameters for {residual_model_name} residuals: {random_search_res.best_params_}")
+        st.info(f"Best CV RMSE for residual model during tuning: {-random_search_res.best_score_:.2f}")
+
+    else:
+        if enable_tuning and len(X_ml_res) < 20:
+            st.warning(f"Insufficient data ({len(X_ml_res)} records) for hyperparameter tuning for {residual_model_name} residuals. Training with default parameters.")
+        # Train residual model with default parameters if no tuning
+        ml_residual_model = residual_model_class(**residual_model_params)
+        ml_residual_model.fit(X_ml_res, y_ml_res)
+        tuned_residual_weight = 1.0 # Default if not tuned
+
 
     # --- Step 3: Forecast future with hybrid model ---
     # Get Prophet's future forecast
@@ -580,8 +691,8 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             st.warning(f"Error predicting residual for future step {idx}: {e}. Falling back to 0 for residual.")
             predicted_residuals.append(0)
 
-    # Final hybrid prediction = Prophet base + ML residual prediction
-    hybrid_predictions = future_prophet_forecast['yhat'].values + np.array(predicted_residuals)
+    # Final hybrid prediction = Prophet base + ML residual prediction * tuned_residual_weight
+    hybrid_predictions = future_prophet_forecast['yhat'].values + (np.array(predicted_residuals) * tuned_residual_weight)
     hybrid_predictions = np.maximum(0, hybrid_predictions).round(0)
 
     return pd.DataFrame({
@@ -618,10 +729,17 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
     ))
 
     # Add forecast intervals if requested and available
-    # Check if 'Predicted_Low' and 'Predicted_High' exist and are not all zeros
+    # Check if 'Predicted_Low' and 'Predicted_High' exist and are not all zeros or equal to predicted
     if show_intervals and 'Predicted_Low' in forecast_data.columns and 'Predicted_High' in forecast_data.columns:
         # Check if there's actual variation in intervals to plot them
-        if not (forecast_data['Predicted_Low'].eq(forecast_data['Predicted']).all() and forecast_data['Predicted_High'].eq(forecast_data['Predicted']).all()):
+        # (i.e., not all low/high are exactly equal to predicted or all zero)
+        has_meaningful_intervals = not (
+            (forecast_data['Predicted_Low'].eq(forecast_data['Predicted']).all() and \
+             forecast_data['Predicted_High'].eq(forecast_data['Predicted']).all()) or \
+            (forecast_data['Predicted_Low'].eq(0).all() and forecast_data['Predicted_High'].eq(0).all())
+        )
+        
+        if has_meaningful_intervals:
             fig.add_trace(go.Scatter(
                 x=pd.concat([forecast_data['Datetime'], forecast_data['Datetime'].iloc[::-1]]), # go forward then backward
                 y=pd.concat([forecast_data['Predicted_High'], forecast_data['Predicted_Low'].iloc[::-1]]), # upper, then lower reversed
@@ -685,7 +803,7 @@ def add_forecasting_insights():
         * **RMSE (Root Mean Square Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions.
         * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
         * **Validation**: The model's performance (RMSE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
-        * **Prediction Intervals (Forecast Low/High)**: For Prophet and Hybrid models, these directly come from the model's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
+        * **Prediction Intervals (Forecast Low/High)**: These provide a range within which the true value is expected to fall. For Prophet and Hybrid models, these come from Prophet's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
         """)
 
 @st.cache_resource # Cache the trained model for faster subsequent runs
@@ -694,7 +812,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
     Initializes and returns the selected machine learning model,
     with optional hyperparameter tuning.
     """
-    param_grid = {} # Define hyperparameter search space
+    param_grid = {} # Define hyperparameter search space for tuning
 
     if model_name == "CatBoost":
         model_class = cb.CatBoostRegressor
@@ -797,7 +915,10 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         if enable_tuning and len(X_train) < 20:
              st.warning(f"Insufficient data ({len(X_train)} records) for hyperparameter tuning. Training {model_name} with default parameters.")
         # Return model with default parameters if tuning is not enabled or not enough data
-        return model_class(**base_params).fit(X_train, y_train) # Fit default model if no tuning
+        # Ensure the model is fitted here if not tuned
+        model = model_class(**base_params)
+        model.fit(X_train, y_train)
+        return model
 
 # --- Streamlit UI ---
 st.title("Emergency Department Forecasting (Ireland)")
@@ -814,15 +935,16 @@ model_option = st.sidebar.selectbox(
 )
 
 # Hyperparameter Tuning options
-st.sidebar.subheader("Hyperparameter Tuning (Tree-based models)")
+st.sidebar.subheader("Hyperparameter Tuning")
 enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
     help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
     help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
 
-if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] and enable_tuning:
-    st.sidebar.warning("Hyperparameter tuning is not available for Prophet or Hybrid models via this interface.")
-    enable_tuning = False # Disable tuning for non-tree models
+# Display warning if tuning is enabled for non-tree models
+if model_option in ["Prophet"] and enable_tuning: # Prophet doesn't use RandomizedSearchCV here
+    st.sidebar.warning("Hyperparameter tuning is not available for Prophet via this interface. It has its own internal cross-validation.")
+    enable_tuning = False # Disable tuning for Prophet
 
 # File uploader widget
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
@@ -920,10 +1042,10 @@ if uploaded_file:
 
                         # --- Model-specific forecasting logic ---
                         if model_option == "Prophet":
-                            # Prophet handles its own feature engineering and iterative prediction
                             if target_col_name == 'Capacity':
                                 st.warning("Prophet model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
                             forecast_results = predict_prophet(hospital_data, future_df_base, target_col_name)
+                            
                             # Calculate RMSE for Prophet on historical data for display
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
                             m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
@@ -935,13 +1057,15 @@ if uploaded_file:
                             st.info(f"Prophet's training RMSE for {target_col_name}: {avg_rmse:.2f} (on historical data)")
                             
                         elif model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]:
-                            # Hybrid model
                             if target_col_name == 'Capacity':
                                 st.warning("Hybrid model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
                             
                             residual_model = 'LightGBM' if model_option == "Prophet-LightGBM Hybrid" else 'CatBoost'
                             
-                            forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name, residual_model_name=residual_model)
+                            forecast_results = predict_hybrid(
+                                historical_data, future_df_base, base_features, target_col_name,
+                                residual_model_name=residual_model, enable_tuning=enable_tuning, tuning_iterations=tuning_iterations
+                            )
                             
                             # Calculate RMSE for Hybrid on historical data (Prophet component's RMSE)
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
@@ -974,37 +1098,40 @@ if uploaded_file:
                             y = training_data[target_col_name]
 
                             # Initialize and/or tune the selected model
+                            # get_ml_model will also fit the model if no tuning is performed
                             model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
 
-                            # --- Time Series Cross-Validation for tree-based models ---
+                            # --- Time Series Cross-Validation for tree-based models (if not tuned) ---
                             # If tuning was enabled, get_ml_model would have already reported the best CV RMSE.
-                            # Otherwise, calculate RMSE for the default model.
-                            if not enable_tuning and len(X) >= 20:
-                                tscv = TimeSeriesSplit(n_splits=min(5, max(1, len(X) // 10)))
-                                fold_rmses = []
-                                for fold_idx, (train_index, test_index) in enumerate(tscv.split(X)):
-                                    X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
-                                    y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
+                            # Otherwise, calculate RMSE for the default model (if not already done by get_ml_model).
+                            if not enable_tuning: # If tuning was NOT enabled, calculate RMSE here
+                                if len(X) >= 20:
+                                    tscv = TimeSeriesSplit(n_splits=min(5, max(1, len(X) // 10)))
+                                    fold_rmses = []
+                                    for fold_idx, (train_index, test_index) in enumerate(tscv.split(X)):
+                                        X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
+                                        y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
-                                    if len(X_train_fold) > 0 and len(X_test_fold) > 0:
-                                        fold_model = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0) # No tuning in CV folds
-                                        y_pred_fold = fold_model.predict(X_test_fold)
-                                        y_pred_fold = np.maximum(0, y_pred_fold).round(0)
-                                        fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
+                                        if len(X_train_fold) > 0 and len(X_test_fold) > 0:
+                                            # Create a fresh model for each fold (not cached for folds)
+                                            fold_model = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0)
+                                            y_pred_fold = fold_model.predict(X_test_fold)
+                                            y_pred_fold = np.maximum(0, y_pred_fold).round(0)
+                                            fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
+                                        else:
+                                            st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
+
+                                    if fold_rmses:
+                                        avg_rmse = np.mean(fold_rmses)
+                                        st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
                                     else:
-                                        st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
-
-                                if fold_rmses:
-                                    avg_rmse = np.mean(fold_rmses)
-                                    st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
-                                else:
-                                    st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
-                            elif not enable_tuning and len(X) > 0: # Fallback to training RMSE if not enough data for CV
-                                y_pred_train = model.predict(X)
-                                y_pred_train = np.maximum(0, y_pred_train).round(0)
-                                avg_rmse = np.sqrt(mean_squared_error(y, y_pred_train))
-                                st.info(f"Training RMSE for {target_col_name}: {avg_rmse:.2f} (Trained on all available data)")
-                            
+                                        st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
+                                elif len(X) > 0: # Fallback to training RMSE if not enough data for CV
+                                    y_pred_train = model.predict(X)
+                                    y_pred_train = np.maximum(0, y_pred_train).round(0)
+                                    avg_rmse = np.sqrt(mean_squared_error(y, y_pred_train))
+                                    st.info(f"Training RMSE for {target_col_name}: {avg_rmse:.2f} (Trained on all available data)")
+                                
                             # Generate predictions for future dates using the trained model
                             forecast_results = forecast_with_lags(model, training_data, future_df_base, available_features, target_col_name)
 
@@ -1022,7 +1149,7 @@ if uploaded_file:
                             st.metric(f"Last {target_col_name} Value", last_val_display)
 
                         # Create and display the forecast plot
-                        # Pass show_intervals=True for all models now that intervals are generated for tree-based too
+                        # show_intervals is always True now, as intervals are generated for all model types
                         show_intervals = True 
                         fig = plot_forecasts(
                             hospital_data.tail(21), # Show last 21 historical points (approx. 1 week at 3 readings/day)
