@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-#import lightgbm as lgb
 import catboost as cb
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit # Import TimeSeriesSplit
@@ -17,6 +16,10 @@ from plotly.subplots import make_subplots
 
 # --- Define Irish Bank Holidays ---
 class IrishBankHolidays(AbstractHolidayCalendar):
+    """
+    Defines the rules for Irish Bank Holidays.
+    Observance logic (nearest_workday, first Monday) is included.
+    """
     rules = [
         Holiday("New Year's Day", month=1, day=1, observance=nearest_workday),
         Holiday("St. Brigid's Day", month=2, day=1, observance=nearest_workday),
@@ -46,11 +49,13 @@ def prepare_data(df):
     })
 
     # Fill Additional_Capacity across the day for each hospital and date
+    # This assumes Additional_Capacity is constant for a given Hospital and Date.
     df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
     df['Additional_Capacity'] = df['Additional_Capacity'].fillna(0)
 
-    # Define common id_vars for melting, these will become the identifier columns
-    common_id_vars = ['Hospital Group Name', 'Hospital', 'Date', 'DayGAR', 'Additional_Capacity']
+    # Define common id_vars for melting. DayGAR is removed as it's not used as a feature
+    # and its future values are not easily predictable for forecasting.
+    common_id_vars = ['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity']
 
     # Melt ED counts into a long format
     df_ed = pd.melt(
@@ -88,7 +93,7 @@ def prepare_data(df):
     df_merged = pd.merge(
         df_ed,
         df_trolley,
-        on=['Hospital Group Name', 'Hospital', 'Date', 'DayGAR', 'Additional_Capacity', 'Time'],
+        on=['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity', 'Time'], # DayGAR removed
         how='inner' # Use inner join to ensure only complete records (both ED and Trolley for a given time) are kept
     )
 
@@ -148,47 +153,56 @@ def prepare_data(df):
 
     return df_merged
 
-def add_lag_features_smart(df, target_column, min_data_threshold=20):
+def add_lag_features_smart(df, target_column):
     """
     Adds lag features intelligently to the DataFrame based on available data for a specific target column.
     Lag features are time-shifted values of the target, useful for capturing temporal dependencies.
+    This function now applies lags and rolling features per hospital group.
     """
-    df = df.copy()
-
-    # Determine maximum safe lag based on the size of the filtered data
-    # This prevents creating too many NaNs or using disproportionately large lags on small datasets.
-    max_safe_lag = min(7, len(df) // 4)
-
-    if max_safe_lag < 1:
-        # If data is too limited, no lag features can be meaningfully created
-        st.warning(f"Very limited data ({len(df)} records). Using minimal features for {target_column}.")
-        return df, []
-
+    df_copy = df.copy() # Work on a copy to avoid modifying the original DataFrame during groupby operations
     lag_features = []
 
-    # Generate lag features for the target_column (e.g., 'ED Beds', 'Trolleys', 'Capacity')
-    for i in range(1, max_safe_lag + 1):
-        lag_col = f'Lag_{target_column}_{i}' # Lag column names are specific to the target (e.g., 'Lag_ED Beds_1')
-        df[lag_col] = df[target_column].shift(i)
-        lag_features.append(lag_col)
+    # Ensure the DataFrame is sorted by Hospital and Datetime before group-wise operations
+    df_copy = df_copy.sort_values(by=['Hospital', 'Datetime'])
 
-    # Add rolling mean features if enough data exists
-    if len(df) >= 6:
-        # Rolling mean over 3 periods
-        df[f'Rolling_Mean_3_{target_column}'] = df[target_column].rolling(window=min(3, len(df)//2), min_periods=1).mean()
-        lag_features.append(f'Rolling_Mean_3_{target_column}')
+    # Apply lags and rolling means grouped by hospital
+    # This is crucial to ensure lags are only calculated within each hospital's time series
+    for hospital_name, hospital_group in df_copy.groupby('Hospital'):
+        # Determine maximum safe lag based on the size of the filtered data for *this* hospital group
+        max_safe_lag = min(7, len(hospital_group) // 4)
+        if max_safe_lag < 1:
+            st.warning(f"Very limited data ({len(hospital_group)} records) for {hospital_name}. Skipping lag features for {target_column}.")
+            continue
 
-        if len(df) >= 14:
-            # Rolling mean over 7 periods
-            df[f'Rolling_Mean_7_{target_column}'] = df[target_column].rolling(window=min(7, len(df)//2), min_periods=1).mean()
-            lag_features.append(f'Rolling_Mean_7_{target_column}')
+        # Add lag features for the current target_column (e.g., 'ED Beds', 'Trolleys', 'Capacity')
+        for i in range(1, max_safe_lag + 1):
+            lag_col = f'Lag_{target_column}_{i}' # Lag column names are specific to the target (e.g., 'Lag_ED Beds_1')
+            df_copy.loc[hospital_group.index, lag_col] = hospital_group[target_column].shift(i)
+            if lag_col not in lag_features: # Add to list only once to avoid duplicates
+                lag_features.append(lag_col)
 
-    # Fill NaN values created by shifting/rolling operations
-    # Prioritize forward fill, then backward fill, then a default of 0
+        # Add rolling mean features if enough data exists for the current hospital group
+        if len(hospital_group) >= 6:
+            roll_mean_3_col = f'Rolling_Mean_3_{target_column}'
+            df_copy.loc[hospital_group.index, roll_mean_3_col] = hospital_group[target_column].rolling(window=min(3, len(hospital_group)//2), min_periods=1).mean()
+            if roll_mean_3_col not in lag_features:
+                lag_features.append(roll_mean_3_col)
+
+        if len(hospital_group) >= 14:
+            roll_mean_7_col = f'Rolling_Mean_7_{target_column}'
+            df_copy.loc[hospital_group.index, roll_mean_7_col] = hospital_group[target_column].rolling(window=min(7, len(hospital_group)//2), min_periods=1).mean()
+            if roll_mean_7_col not in lag_features:
+                lag_features.append(roll_mean_7_col)
+
+    # Fill NaN values created by shifting/rolling operations.
+    # It's better to fill NaNs after all group-wise operations are complete,
+    # or handle them during model training (e.g., CatBoost can handle NaNs).
+    # Here, we'll forward-fill, then back-fill, then default to 0 for robustness.
     for feature in lag_features:
-        df[feature] = df[feature].fillna(method='ffill').fillna(method='bfill').fillna(0)
+        df_copy[feature] = df_copy[feature].fillna(method='ffill').fillna(method='bfill').fillna(0)
 
-    return df, lag_features
+    return df_copy, lag_features
+
 
 def create_future_dates(last_date, hospital, hospital_code, additional_capacity, days=7):
     """
@@ -227,7 +241,8 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
             is_holiday = 0
             try:
                 calendar = IrishBankHolidays()
-                holidays = calendar.holidays(start=future_datetime, end=future_datetime)
+                # Check for holidays only within the specific future datetime
+                holidays = calendar.holidays(start=future_datetime.normalize(), end=future_datetime.normalize())
                 is_holiday = int(future_datetime.normalize() in holidays)
             except Exception: # Catch any errors during holiday calculation
                 pass
@@ -274,18 +289,26 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     """
     Generates forecasts iteratively, updating lag and rolling features
     with each new prediction.
+    historical_data should already be filtered for the specific hospital and target column.
     """
-    # Get the last few actual values from historical data for initial lag features
-    last_values = historical_data[target_column].tail(7).values # Get last 7 values
+    if historical_data.empty:
+        st.error("Historical data for lag forecasting is empty. Cannot generate forecasts.")
+        return [0] * len(future_df) # Return zeros if no historical data
 
     predictions = []
-    # Initialize current_lags with historical values (most recent first)
-    current_lags = list(reversed(last_values))
+
+    # Get the last few actual values from historical data for initial lag features
+    # Ensure to get at least 7 values or pad with 0s if not enough history
+    last_values = historical_data[target_column].tail(7).values
+    current_lags = list(reversed(last_values.tolist())) # Reverse to get most recent first
+    # Pad with zeros if less than 7 historical points are available for initial lags
+    current_lags = current_lags + [0] * (7 - len(current_lags))
 
     # Initialize rolling statistics with historical data's tail
-    # Ensure these are initialized with data pertinent to the specific target_column
-    historical_mean_3 = historical_data[target_column].tail(3).mean()
-    historical_mean_7 = historical_data[target_column].tail(7).mean()
+    # Provide fallbacks if not enough data for actual rolling calculation
+    historical_mean_3 = historical_data[target_column].tail(3).mean() if len(historical_data) >= 3 else historical_data[target_column].mean()
+    historical_mean_7 = historical_data[target_column].tail(7).mean() if len(historical_data) >= 7 else historical_data[target_column].mean()
+
 
     for idx, row in future_df.iterrows():
         try:
@@ -297,7 +320,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
                     if lag_num < len(current_lags):
                         feature_values.append(current_lags[lag_num]) # Use the dynamically updated lag value
                     else:
-                        feature_values.append(0) # Default to 0 if lag is not available
+                        feature_values.append(0) # Default to 0 if lag is not available (should be handled by padding)
                 elif feature == f'Rolling_Mean_3_{target_column}': # Check for target-specific rolling mean 3
                     feature_values.append(historical_mean_3)
                 elif feature == f'Rolling_Mean_7_{target_column}': # Check for target-specific rolling mean 7
@@ -307,7 +330,15 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
                     if feature in row:
                         feature_values.append(row[feature])
                     else:
-                        feature_values.append(0) # Default to 0 if feature is missing
+                        # This case indicates a potential mismatch between model features and future_df columns
+                        st.warning(f"Feature '{feature}' not found in future_df row, defaulting to 0. Check feature consistency.")
+                        feature_values.append(0)
+
+            # Ensure the feature vector has the correct number of features as expected by the model
+            if len(feature_values) != len(features):
+                st.error(f"Feature vector length mismatch: Expected {len(features)}, got {len(feature_values)}. Skipping prediction.")
+                predictions.append(historical_data[target_column].mean()) # Fallback
+                continue
 
             # Make the prediction using the constructed feature vector
             feature_vector = np.array(feature_values).reshape(1, -1)
@@ -320,10 +351,14 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
             current_lags = [pred] + current_lags[:6] # Keep a window of 7 lags
 
             # Update rolling statistics based on the new prediction
-            if len(predictions) >= 3:
-                historical_mean_3 = np.mean(predictions[-3:])
-            if len(predictions) >= 7:
-                historical_mean_7 = np.mean(predictions[-7:])
+            # Create a temporary list including current prediction and recent historicals
+            # Ensure we have enough data points for the rolling calculations
+            temp_rolling_data = list(reversed(predictions)) + list(reversed(historical_data[target_column].values))
+            if len(temp_rolling_data) >= 3:
+                historical_mean_3 = np.mean(temp_rolling_data[:3])
+            if len(temp_rolling_data) >= 7:
+                historical_mean_7 = np.mean(temp_rolling_data[:7])
+
 
         except Exception as e:
             # Fallback in case of prediction error
@@ -471,7 +506,7 @@ if uploaded_file:
                 'IsWeekend', 'IsMonday', 'IsFriday',
                 'Hour_sin', 'Hour_cos', 'Day_sin', 'Day_cos', 'Month_sin', 'Month_cos',
                 'IsHoliday', 'IsSummer', 'IsWinter', 'IsPeakHour', 'IsLowHour',
-                'Hospital_Code' # Capacity is now a target, so remove from base_features if it's the target
+                'Hospital_Code'
             ]
 
             # Iterate through each selected hospital and metric ('ED Beds', 'Trolleys', 'Capacity')
@@ -481,9 +516,10 @@ if uploaded_file:
                 # Filter data for the current hospital
                 hospital_data = df_processed[df_processed['Hospital'] == hospital].copy()
 
-                # Extract hospital code and additional capacity (now 'Capacity') for future dates
+                # Extract hospital code and current additional capacity (now 'Capacity') for future dates
                 hospital_code = hospital_data['Hospital_Code'].iloc[0] if not hospital_data.empty else 0
-                current_hospital_capacity_val = hospital_data['Capacity'].fillna(0).iloc[0] if not hospital_data.empty else 0
+                # Use the last known capacity value for forecasting future capacity or as a feature for other forecasts
+                current_hospital_capacity_val = hospital_data['Capacity'].fillna(0).iloc[-1] if not hospital_data.empty else 0
 
 
                 # Get the last date from the historical data for creating future dates
@@ -498,17 +534,19 @@ if uploaded_file:
 
                     st.info(f"Processing '{target_col_name}' for {hospital} ({hospital_data[target_col_name].count()} records)")
 
-                    metric_specific_data = hospital_data.copy()
-
-                    # Add lag and rolling features specifically for the current target column
-                    data_with_lags, lag_features = add_lag_features_smart(metric_specific_data, target_col_name)
+                    # Add lag and rolling features specifically for the current target column,
+                    # ensuring they are calculated within the hospital's data.
+                    # This now correctly handles grouping internally.
+                    data_with_lags, lag_features = add_lag_features_smart(hospital_data.copy(), target_col_name)
 
                     # Determine features for this specific model
                     model_features = base_features[:]
-                    if target_col_name != 'Capacity':
+                    # If the target is not 'Capacity', then 'Capacity' can be a feature
+                    if target_col_name != 'Capacity' and 'Capacity' in data_with_lags.columns:
                         model_features.append('Capacity')
 
                     all_features_for_model = model_features + lag_features
+                    # Ensure features exist in the DataFrame and are not the target itself
                     available_features = [f for f in all_features_for_model if f in data_with_lags.columns and f != target_col_name]
                     training_data = data_with_lags.dropna(subset=[target_col_name] + available_features)
 
@@ -519,54 +557,61 @@ if uploaded_file:
                     X = training_data[available_features]
                     y = training_data[target_col_name]
 
-                    # Initialize LightGBM Regressor with hyperparameters for better accuracy
+                    # Initialize CatBoost Regressor with hyperparameters
                     model = cb.CatBoostRegressor(
                         iterations=min(1000, len(X) * 3),  # CatBoost can handle more iterations efficiently
                         learning_rate=0.08,                # Lower learning rate for better generalization
-                        depth=6,                          # CatBoost handles deeper trees better than LightGBM
-                        subsample=0.8,                    # Keep same
-                        colsample_bylevel=0.8,            # Keep same
-                        l2_leaf_reg=3,                    # CatBoost's default regularization
+                        depth=6,                          # CatBoost handles deeper trees better
+                        subsample=0.8,                    # Sampling rate for bagging
+                        colsample_bylevel=0.8,            # Feature subsampling
+                        l2_leaf_reg=3,                    # L2 regularization coefficient
                         verbose=False,
-                        random_state=42,                        allow_writing_files=False,
+                        random_state=42,
+                        allow_writing_files=False,        # Important for Streamlit environment
                         bagging_temperature=1,             # Controls randomness in Bayesian bootstrap
                         od_type='Iter',                   # Overfitting detection
                         od_wait=50                        # Stop if no improvement for 50 iterations
                     )
 
                     # --- Time Series Cross-Validation ---
+                    avg_rmse = np.nan # Initialize RMSE
                     if len(X) >= 20: # Only perform CV if enough data for at least 3 splits
-                        tscv = TimeSeriesSplit(n_splits=min(5, len(X) // 10)) # Adjust n_splits dynamically
+                        # n_splits adjusted dynamically to prevent issues with small datasets
+                        tscv = TimeSeriesSplit(n_splits=min(5, max(1, len(X) // 10)))
                         fold_rmses = []
-                        for train_index, test_index in tscv.split(X):
+                        for fold_idx, (train_index, test_index) in enumerate(tscv.split(X)):
                             X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
                             y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
                             if len(X_train_fold) > 0 and len(X_test_fold) > 0:
                                 fold_model = cb.CatBoostRegressor(**model.get_params())
-                                fold_model.fit(X_train_fold, y_train_fold)
+                                fold_model.fit(X_train_fold, y_train_fold, verbose=False)
                                 y_pred_fold = fold_model.predict(X_test_fold)
                                 fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
                             else:
-                                st.warning(f"Skipping a fold due to insufficient data for '{target_col_name}' at {hospital}.")
+                                st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
 
                         if fold_rmses:
                             avg_rmse = np.mean(fold_rmses)
                             st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
                         else:
-                            avg_rmse = np.nan
                             st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
                     else:
-                        st.info(f"Not enough data for cross-validation for '{target_col_name}'. Training on all available data.")
+                        st.info(f"Not enough data for cross-validation for '{target_col_name}' ({len(X)} records). Training on all available data.")
                         # If not enough for CV, train on all data for the final forecast
-                        model.fit(X, y)
-                        y_pred_test = model.predict(X.tail(min(5,len(X)))) # Predict on last few for a basic RMSE
-                        rmse = np.sqrt(mean_squared_error(y.tail(min(5,len(y))), y_pred_test))
-                        avg_rmse = rmse # Report this as the RMSE if no CV
+                        model.fit(X, y, verbose=False) # Train on all data for direct RMSE
+                        if len(X) > 0:
+                            y_pred_train = model.predict(X)
+                            avg_rmse = np.sqrt(mean_squared_error(y, y_pred_train))
+                            st.info(f"Training RMSE for {target_col_name}: {avg_rmse:.2f} (Trained on all available data)")
+
 
                     try:
                         # Train the final model on all available data for the most accurate future forecast
-                        model.fit(X, y)
+                        # (This is done above if no CV was performed, or re-done here if CV was skipped for final model)
+                        if avg_rmse is np.nan: # If CV was skipped entirely, ensure model is trained
+                             model.fit(X, y, verbose=False)
+
 
                         # Create future timestamps for which to generate forecasts
                         future_df = create_future_dates(
@@ -578,17 +623,19 @@ if uploaded_file:
                         )
 
                         # Generate predictions for future dates using the trained model
+                        # Ensure historical_data passed is specific to the hospital and target
                         predictions = forecast_with_lags(model, training_data, future_df, available_features, target_col_name)
                         future_df['Predicted'] = predictions # Add predictions to the future DataFrame
 
                         # Display key metrics using Streamlit columns
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}") # Display average CV RMSE
+                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}" if avg_rmse is not np.nan else "N/A") # Display average CV RMSE
                         with col2:
                             st.metric(f"Training Records", f"{len(X)}")
                         with col3:
-                            st.metric(f"Last {target_col_name} Value", f"{training_data[target_col_name].iloc[-1]:.0f}")
+                            last_val_display = f"{training_data[target_col_name].iloc[-1]:.0f}" if not training_data.empty else "N/A"
+                            st.metric(f"Last {target_col_name} Value", last_val_display)
 
                         # Create and display the forecast plot
                         fig = plot_forecasts(
@@ -644,7 +691,6 @@ else:
         - `Hospital Group Name`: The group the hospital belongs to.
         - `Hospital`: Unique identifier for the hospital.
         - `Date`: The date of the observation (e.g., '30/05/2025').
-        - `DayGAR`: Categorical day information (if available, e.g., 'Day X').
         - `Tracker8am`, `Tracker2pm`, `Tracker8pm`: ED bed counts at 8 AM, 2 PM, 8 PM respectively.
         - `TimeTotal_8am`, `TimeTotal_2pm`, `TimeTotal_8pm`: Trolley counts at 8 AM, 2 PM, 8 PM respectively.
         - `AdditionalCapacityOpen Morning`: Any additional capacity opened in the morning for that day.
@@ -654,4 +700,6 @@ else:
         - Data for multiple hospitals (optional, but the app supports it).
         - At least **10-15 records** per hospital-metric combination for basic forecasting.
         - At least **30+ records** per hospital-metric combination for more reliable forecasting.
-        """) 
+        """)
+
+
