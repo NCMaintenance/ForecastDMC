@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import lightgbm as lgb
+#import lightgbm as lgb
+import catboost as cb
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit # Import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error
@@ -519,18 +520,19 @@ if uploaded_file:
                     y = training_data[target_col_name]
 
                     # Initialize LightGBM Regressor with hyperparameters for better accuracy
-                    model = lgb.LGBMRegressor(
-                        n_estimators=min(868, len(X) * 2), # Increased n_estimators, adjusted based on data size
-                        learning_rate=0.12, # Further reduced learning rate for potentially higher accuracy
-                        max_depth=min(4, len(available_features) + 1), # Increased max_depth, consider feature count
-                        num_leaves=min(109, 2 ** min(10, len(available_features) + 1) - 1), # Increased num_leaves
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        reg_alpha=0.2, # Increased L1 regularization
-                        reg_lambda=0.2, # Increased L2 regularization
-                        verbose=-1,
-                        random_state=42,
-                        force_col_wise=True
+                    model = cb.CatBoostRegressor(
+                        iterations=min(1000, len(X) * 3),  # CatBoost can handle more iterations efficiently
+                        learning_rate=0.08,                # Lower learning rate for better generalization
+                        depth=6,                          # CatBoost handles deeper trees better than LightGBM
+                        subsample=0.8,                    # Keep same
+                        colsample_bylevel=0.8,            # Keep same
+                        l2_leaf_reg=3,                    # CatBoost's default regularization
+                        verbose=False,
+                        random_state=42,                        allow_writing_files=False,
+                        bootstrap_type='Bayesian',         # CatBoost-specific: better for small datasets
+                        bagging_temperature=1,             # Controls randomness in Bayesian bootstrap
+                        od_type='Iter',                   # Overfitting detection
+                        od_wait=50                        # Stop if no improvement for 50 iterations
                     )
 
                     # --- Time Series Cross-Validation ---
@@ -542,7 +544,7 @@ if uploaded_file:
                             y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
                             if len(X_train_fold) > 0 and len(X_test_fold) > 0:
-                                fold_model = lgb.LGBMRegressor(**model.get_params()) # Use same params for fold models
+                                fold_model = cb.CatBoostRegressor(**model.get_params())
                                 fold_model.fit(X_train_fold, y_train_fold)
                                 y_pred_fold = fold_model.predict(X_test_fold)
                                 fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
