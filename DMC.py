@@ -1,18 +1,20 @@
-import streamlit as st
+# import streamlit as st
 import pandas as pd
 import numpy as np
+import argparse
+import itertools
 import lightgbm as lgb
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit # Import TimeSeriesSplit
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
 from dateutil.rrule import MO
-import shap
-import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
+# import shap # Commented out as not installed by user's script and not essential for core MAE/forecast
+# import matplotlib.pyplot as plt # Commented out
+# import plotly.graph_objects as go # Commented out
+# import plotly.express as px # Commented out
+# from plotly.subplots import make_subplots # Commented out
 
 # --- Define Irish Bank Holidays ---
 class IrishBankHolidays(AbstractHolidayCalendar):
@@ -160,7 +162,7 @@ def add_lag_features_smart(df, target_column, min_data_threshold=20):
 
     if max_safe_lag < 1:
         # If data is too limited, no lag features can be meaningfully created
-        st.warning(f"Very limited data ({len(df)} records). Using minimal features for {target_column}.")
+        print(f"Warning: Very limited data ({len(df)} records). Using minimal features for {target_column}.")
         return df, []
 
     lag_features = []
@@ -185,7 +187,7 @@ def add_lag_features_smart(df, target_column, min_data_threshold=20):
     # Fill NaN values created by shifting/rolling operations
     # Prioritize forward fill, then backward fill, then a default of 0
     for feature in lag_features:
-        df[feature] = df[feature].fillna(method='ffill').fillna(method='bfill').fillna(0)
+        df[feature] = df[feature].ffill().bfill().fillna(0)
 
     return df, lag_features
 
@@ -326,7 +328,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
 
         except Exception as e:
             # Fallback in case of prediction error
-            st.error(f"Error in prediction step {idx} for {target_column}: {e}")
+            print(f"Error in prediction step {idx} for {target_column}: {e}")
             predictions.append(historical_data[target_column].mean()) # Use historical mean as a fallback
 
     return predictions
@@ -391,80 +393,92 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name):
 
     return fig
 
-def add_forecasting_insights():
-    """Displays insights and tips about the forecasting process."""
-    with st.expander("💡 Forecasting Insights & Tips", expanded=False):
-        st.subheader("Data Requirements")
-        st.markdown("""
-        For accurate forecasting, you need:
-        * **Minimum 30 records** per hospital-metric combination
-        * **Consistent time intervals** (8am, 2pm, 8pm readings are ideal)
-        * **Recent data** (within the last 6 months ideally for best relevance)
-        * **Complete records** (avoid too many missing values, as they can hinder model performance)
-        """)
+# def add_forecasting_insights():
+#     """Displays insights and tips about the forecasting process."""
+    # with st.expander("💡 Forecasting Insights & Tips", expanded=False):
+    #     st.subheader("Data Requirements")
+    #     st.markdown("""
+    #     For accurate forecasting, you need:
+    #     * **Minimum 30 records** per hospital-metric combination
+    #     * **Consistent time intervals** (8am, 2pm, 8pm readings are ideal)
+    #     * **Recent data** (within the last 6 months ideally for best relevance)
+    #     * **Complete records** (avoid too many missing values, as they can hinder model performance)
+    #     """)
+    #
+    #     st.subheader("Understanding Your Results")
+    #     st.markdown("""
+    #     * **MAE (Mean Absolute Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions.
+    #     * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
+    #     * **Validation**: The model's performance (MAE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
+    #     """)
 
-        st.subheader("Understanding Your Results")
-        st.markdown("""
-        * **RMSE (Root Mean Square Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions.
-        * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
-        * **Validation**: The model's performance (RMSE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
-        """)
+# --- Main execution flow for iterative testing ---
+def main(file_path="sample_data.xlsx", forecast_days=7, hospital_option="All Hospitals"):
+    # st.title("Emergency Department Forecasting (Ireland)")
+    # st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
 
-# --- Streamlit UI ---
-st.title("Emergency Department Forecasting (Ireland)")
-st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
+    # Sidebar control for number of forecast days
+    # forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7) # Hardcoded
 
-# Sidebar control for number of forecast days
-forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7)
+    # File uploader widget
+    # uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"]) # Hardcoded
+    uploaded_file = file_path # Use the provided file_path
 
-# File uploader widget
-uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
+    if uploaded_file:
+        try:
+            # Load and prepare data using the updated function
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+            df_processed = prepare_data(df) # Renamed to df_processed as it's no longer just 'long'
 
-if uploaded_file:
-    try:
-        # Load and prepare data using the updated function
-        df = pd.read_excel(uploaded_file)
-        df_processed = prepare_data(df) # Renamed to df_processed as it's no longer just 'long'
+            # Show data loading success message and summary
+            print(f"✅ Data loaded and processed successfully! {len(df_processed)} records found.")
 
-        # Show data loading success message and summary
-        st.success(f"✅ Data loaded and processed successfully! {len(df_processed)} records found.")
+            # Display a sample of the processed data to confirm the new structure
+            # st.subheader("📋 Sample of Processed Data")
+            # st.dataframe(df_processed[['Date', 'Time', 'ED Beds', 'Trolleys', 'Capacity']].head())
+            print("\n📋 Sample of Processed Data:")
+            print(df_processed[['Date', 'Time', 'ED Beds', 'Trolleys', 'Capacity']].head())
 
-        # Display a sample of the processed data to confirm the new structure
-        st.subheader("📋 Sample of Processed Data")
-        st.dataframe(df_processed[['Date', 'Time', 'ED Beds', 'Trolleys', 'Capacity']].head())
+            # Get unique hospitals for selection in the sidebar
+            hospitals = sorted(df_processed['Hospital'].unique())
 
-        # Get unique hospitals for selection in the sidebar
-        hospitals = sorted(df_processed['Hospital'].unique())
+            # Show data summary by Hospital and the new metrics
+            data_summary = df_processed.groupby(['Hospital']).agg(
+                ed_records=('ED Beds', 'count'),
+                trolley_records=('Trolleys', 'count'),
+                capacity_records=('Capacity', 'count') # Added capacity records to summary
+            ).reset_index()
+            # st.subheader("📊 Data Summary by Hospital")
+            # st.dataframe(data_summary, use_container_width=True)
+            print("\n📊 Data Summary by Hospital:")
+            print(data_summary)
 
-        # Show data summary by Hospital and the new metrics
-        data_summary = df_processed.groupby(['Hospital']).agg(
-            ed_records=('ED Beds', 'count'),
-            trolley_records=('Trolleys', 'count'),
-            capacity_records=('Capacity', 'count') # Added capacity records to summary
-        ).reset_index()
-        st.subheader("📊 Data Summary by Hospital")
-        st.dataframe(data_summary, use_container_width=True)
+            # Hospital selection dropdown
+            # st.sidebar.header("Forecast Settings")
+            # hospital_option = st.sidebar.selectbox( # Hardcoded
+            #     "Select Hospital:",
+            #     options=["All Hospitals"] + hospitals
+            # )
 
-        # Hospital selection dropdown
-        st.sidebar.header("Forecast Settings")
-        hospital_option = st.sidebar.selectbox(
-            "Select Hospital:",
-            options=["All Hospitals"] + hospitals
-        )
+            # Run forecast button
+            # run_forecast = st.sidebar.button("🚀 Run Forecast", type="primary") # Assume true for script execution
+            run_forecast = True
 
-        # Run forecast button
-        run_forecast = st.sidebar.button("🚀 Run Forecast", type="primary")
+            if run_forecast:
+                # st.header("📊 Forecast Results")
+                print("\n📊 Forecast Results")
 
-        if run_forecast:
-            st.header("📊 Forecast Results")
+                # Determine which hospitals to process based on user selection
+                if hospital_option == "All Hospitals":
+                    selected_hospitals = hospitals
+                else:
+                    selected_hospitals = [hospital_option]
 
-            # Determine which hospitals to process based on user selection
-            if hospital_option == "All Hospitals":
-                selected_hospitals = hospitals
-            else:
-                selected_hospitals = [hospital_option]
+                # TODO: Add iterative loop for hyperparameter tuning or data subset adjustment here
+                # This loop could iterate over different model parameters, feature sets, or data windows.
+                # For each iteration, the MAE would be calculated and stored.
 
-            # Define base features that are common to all target columns
+                # Define base features that are common to all target columns
             base_features = [
                 'Hour', 'DayOfWeek', 'DayOfMonth', 'Month', 'Quarter', 'WeekOfYear',
                 'IsWeekend', 'IsMonday', 'IsFriday',
@@ -475,7 +489,8 @@ if uploaded_file:
 
             # Iterate through each selected hospital and metric ('ED Beds', 'Trolleys', 'Capacity')
             for hospital in selected_hospitals:
-                st.subheader(f"🏥 {hospital}")
+                # st.subheader(f"🏥 {hospital}")
+                print(f"\n🏥 Processing Hospital: {hospital}")
 
                 # Filter data for the current hospital
                 hospital_data = df_processed[df_processed['Hospital'] == hospital].copy()
@@ -489,13 +504,15 @@ if uploaded_file:
                 last_date = hospital_data['Datetime'].max().date() if not hospital_data.empty else datetime.now().date()
 
                 # Process 'ED Beds', 'Trolleys', and 'Capacity' forecasts separately
+                # TODO: This inner loop could also be part of the hyperparameter tuning,
+                # potentially testing different parameters for each target column.
                 for target_col_name in ['ED Beds', 'Trolleys', 'Capacity']: # Added 'Capacity' as a target
                     # Check if we have sufficient data for the current target column
                     if hospital_data[target_col_name].count() < 10:
-                        st.warning(f"⚠️ Insufficient data for '{target_col_name}' at {hospital} ({hospital_data[target_col_name].count()} records). Need at least 10 records for meaningful forecasting.")
+                        print(f"Warning: ⚠️ Insufficient data for '{target_col_name}' at {hospital} ({hospital_data[target_col_name].count()} records). Need at least 10 records for meaningful forecasting.")
                         continue
 
-                    st.info(f"Processing '{target_col_name}' for {hospital} ({hospital_data[target_col_name].count()} records)")
+                    print(f"Processing '{target_col_name}' for {hospital} ({hospital_data[target_col_name].count()} records)")
 
                     metric_specific_data = hospital_data.copy()
 
@@ -512,145 +529,293 @@ if uploaded_file:
                     training_data = data_with_lags.dropna(subset=[target_col_name] + available_features)
 
                     if len(training_data) < 5:
-                        st.warning(f"⚠️ After preprocessing, insufficient data for '{target_col_name}' at {hospital} ({len(training_data)} records). Need at least 5 records to train a model.")
+                        print(f"Warning: ⚠️ After preprocessing, insufficient data for '{target_col_name}' at {hospital} ({len(training_data)} records). Need at least 5 records to train a model.")
                         continue
 
                     X = training_data[available_features]
                     y = training_data[target_col_name]
 
-                    # Initialize LightGBM Regressor with hyperparameters for better accuracy
-                    model = lgb.LGBMRegressor(
-                        n_estimators=min(600, len(X) * 2), # Increased n_estimators, adjusted based on data size
-                        learning_rate=0.1, # Further reduced learning rate for potentially higher accuracy
-                        max_depth=min(4, len(available_features) + 1), # Increased max_depth, consider feature count
-                        num_leaves=min(40, 2 ** min(10, len(available_features) + 1) - 1), # Increased num_leaves
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        reg_alpha=0.2, # Increased L1 regularization
-                        reg_lambda=0.2, # Increased L2 regularization
-                        verbose=-1,
-                        random_state=42,
-                        force_col_wise=True
+                    # --- Hyperparameter Tuning Loop ---
+                    param_grid = {
+                        'n_estimators': [100, 200, 300],
+                        'learning_rate': [0.01, 0.05, 0.1],
+                        'max_depth': [3, 4, 5],
+                        'num_leaves': [20, 30, 40]
+                    }
+                    # Create all combinations of hyperparameters
+                    all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
+
+                    best_mae_for_target = float('inf')
+                    best_params_for_target = None
+                    mae_achieved_lt_3 = False
+
+                    # Default model in case no tuning is successful or data is too small for CV in iteration
+                    final_model = lgb.LGBMRegressor( # Default parameters
+                        n_estimators=min(600, len(X) * 2), learning_rate=0.1, max_depth=min(4, len(available_features) + 1),
+                        num_leaves=min(40, 2 ** min(10, len(available_features) + 1) - 1), subsample=0.8, colsample_bytree=0.8,
+                        reg_alpha=0.2, reg_lambda=0.2, verbose=-1, random_state=42, force_col_wise=True
                     )
+                    avg_mae = float('nan') # Initialize avg_mae for the target
 
-                    # --- Time Series Cross-Validation ---
-                    if len(X) >= 20: # Only perform CV if enough data for at least 3 splits
-                        tscv = TimeSeriesSplit(n_splits=min(5, len(X) // 10)) # Adjust n_splits dynamically
-                        fold_rmses = []
-                        for train_index, test_index in tscv.split(X):
-                            X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
-                            y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
-                            if len(X_train_fold) > 0 and len(X_test_fold) > 0:
-                                fold_model = lgb.LGBMRegressor(**model.get_params()) # Use same params for fold models
-                                fold_model.fit(X_train_fold, y_train_fold)
-                                y_pred_fold = fold_model.predict(X_test_fold)
-                                fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
-                            else:
-                                st.warning(f"Skipping a fold due to insufficient data for '{target_col_name}' at {hospital}.")
-
-                        if fold_rmses:
-                            avg_rmse = np.mean(fold_rmses)
-                            st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
-                        else:
-                            avg_rmse = np.nan
-                            st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
-                    else:
-                        st.info(f"Not enough data for cross-validation for '{target_col_name}'. Training on all available data.")
-                        # If not enough for CV, train on all data for the final forecast
-                        model.fit(X, y)
-                        y_pred_test = model.predict(X.tail(min(5,len(X)))) # Predict on last few for a basic RMSE
-                        rmse = np.sqrt(mean_squared_error(y.tail(min(5,len(y))), y_pred_test))
-                        avg_rmse = rmse # Report this as the RMSE if no CV
-
-                    try:
-                        # Train the final model on all available data for the most accurate future forecast
-                        model.fit(X, y)
-
-                        # Create future timestamps for which to generate forecasts
-                        future_df = create_future_dates(
-                            pd.to_datetime(last_date),
-                            hospital,
-                            hospital_code,
-                            current_hospital_capacity_val, # This capacity is for creating features for other targets
-                            days=forecast_days
-                        )
-
-                        # Generate predictions for future dates using the trained model
-                        predictions = forecast_with_lags(model, training_data, future_df, available_features, target_col_name)
-                        future_df['Predicted'] = predictions # Add predictions to the future DataFrame
-
-                        # Display key metrics using Streamlit columns
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}") # Display average CV RMSE
-                        with col2:
-                            st.metric(f"Training Records", f"{len(X)}")
-                        with col3:
-                            st.metric(f"Last {target_col_name} Value", f"{training_data[target_col_name].iloc[-1]:.0f}")
-
-                        # Create and display the forecast plot
-                        fig = plot_forecasts(
-                            training_data.tail(21), # Show last 21 historical points (approx. 1 week at 3 readings/day)
-                            future_df,
-                            target_col_name, # Pass the metric name for plot title/labels
-                            hospital
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-
-                        # Allow users to view detailed forecast data in an expandable section
-                        with st.expander(f"📋 {target_col_name} Forecast Details"):
-                            forecast_display = future_df[['Date', 'Time', 'Predicted']].copy()
-                            forecast_display['Predicted'] = forecast_display['Predicted'].round(1) # Round predictions
-                            st.dataframe(
-                                forecast_display,
-                                use_container_width=True
+                    print(f"\n--- Starting Hyperparameter Tuning for {target_col_name} at {hospital} ---")
+                    # Only run tuning if there's enough data to make it meaningful (e.g., for CV within iteration)
+                    if len(X) >= 20: # Threshold for attempting tuning loop
+                        for i, params in enumerate(all_params):
+                            print(f"Iteration {i+1}/{len(all_params)} for {target_col_name} at {hospital}: Trying params {params}")
+                            iteration_mae = run_forecasting_iteration(
+                                training_data_full=training_data.copy(),
+                                available_features=available_features,
+                                target_col_name=target_col_name,
+                                hospital_name=hospital,
+                                forecast_days=forecast_days,
+                                base_features=base_features,
+                                hyperparams=params,
+                                last_known_date=last_date,
+                                hospital_code_val=hospital_code,
+                                capacity_val=current_hospital_capacity_val
                             )
 
-                        # Provide a download button for the forecast data
-                        csv_data = future_df[['Datetime', 'Hospital', 'Predicted']].copy()
-                        csv_data['Metric'] = target_col_name # Identify the metric in the CSV
-                        st.download_button(
-                            f"📥 Download {target_col_name} Forecast CSV",
-                            csv_data.to_csv(index=False),
-                            file_name=f"{hospital}_{target_col_name.replace(' ', '_')}_forecast.csv", # Sanitize filename
-                            mime="text/csv",
-                            key=f"{hospital}_{target_col_name}_download"
-                        )
+                            if pd.notna(iteration_mae):
+                                print(f"MAE for iteration {i+1} with params {params}: {iteration_mae:.4f}")
+                                if iteration_mae < best_mae_for_target:
+                                    best_mae_for_target = iteration_mae
+                                    best_params_for_target = params
 
-                    except Exception as e:
-                        st.error(f"❌ Error during final model training or forecast generation for '{target_col_name}' at {hospital}: {str(e)}")
-                        st.info("This might be due to issues with the dataset or model training for future predictions.")
+                                if iteration_mae < 3:
+                                    print(f"🎉 Success! MAE < 3 ({iteration_mae:.4f}) achieved for {target_col_name} at {hospital} with params: {params}")
+                                    mae_achieved_lt_3 = True
+                                    # Update best_mae and best_params one last time before breaking
+                                    if iteration_mae < best_mae_for_target: # Should be redundant due to prior check, but safe
+                                        best_mae_for_target = iteration_mae
+                                        best_params_for_target = params
+                                    break
+                            else:
+                                print(f"Warning: Iteration {i+1} with params {params} resulted in NaN MAE. Skipping.")
 
-                    st.divider() # Separator for each metric's results
+                        if best_params_for_target:
+                            print(f"\nBest MAE for {target_col_name} at {hospital} after tuning: {best_mae_for_target:.4f} with parameters: {best_params_for_target}")
+                            final_model.set_params(**best_params_for_target) # Set best params to the model
+                            avg_mae = best_mae_for_target
+                        else:
+                            print(f"Warning: Hyperparameter tuning did not find suitable parameters for {target_col_name} at {hospital}. Using default model parameters.")
+                            # avg_mae will remain NaN or be based on default model's simple test if data was too small for CV
+                            # Need to calculate MAE for default model if tuning didn't run or find params
+                            if len(X) > 0: # Ensure there's data
+                                final_model.fit(X,y) # Fit default
+                                y_pred_default_test = final_model.predict(X.tail(min(5,len(X))))
+                                avg_mae = mean_absolute_error(y.tail(min(5,len(y))), y_pred_default_test)
+                                print(f"MAE for default model (due to lack of tuning results or small data): {avg_mae:.4f}")
+                            else:
+                                avg_mae = float('nan')
+
+
+                    else: # If not enough data for the tuning loop (e.g. < 20 records)
+                        print(f"Info: Not enough data for hyperparameter tuning for '{target_col_name}' at {hospital} ({len(X)} records). Training with default parameters and simple evaluation.")
+                        if len(X) > 0:
+                            final_model.fit(X, y)
+                            y_pred_test = final_model.predict(X.tail(min(5,len(X))))
+                            avg_mae = mean_absolute_error(y.tail(min(5,len(y))), y_pred_test)
+                            print(f"MAE with default parameters (simple eval): {avg_mae:.4f}")
+                        else:
+                             print(f"Warning: No data to train even a default model for '{target_col_name}' at {hospital}.")
+                             final_model = None # Cannot proceed if no data
+                             avg_mae = float('nan')
+
+                    print(f"\n--- Hyperparameter Tuning Summary for {target_col_name} at {hospital} ---")
+                    if pd.notna(avg_mae):
+                        print(f"Final MAE for {target_col_name}: {avg_mae:.4f}")
+                        if best_params_for_target:
+                             print(f"Achieved with parameters: {best_params_for_target}")
+                        else:
+                             print("Achieved with default parameters (tuning skipped or unsuccessful).")
+                        if mae_achieved_lt_3 or (pd.notna(avg_mae) and avg_mae < 3) : # Check if original success or default got it
+                            print(f"Target MAE < 3 was achieved for {target_col_name} at {hospital}.")
+                        else:
+                            print(f"Target MAE < 3 was NOT achieved. Best MAE was {avg_mae:.4f}.")
+                    else:
+                        print(f"Warning: MAE could not be determined for {target_col_name} at {hospital}.")
+                        final_model = None # Cannot proceed with forecasting
+
+
+                    if final_model:
+                        try:
+                            # Train the final model on all available data (X,y) using the determined parameters
+                            final_model.fit(X, y)
+                            # Create future timestamps for which to generate forecasts
+                            future_df = create_future_dates(
+                                pd.to_datetime(last_date),
+                                hospital,
+                                hospital_code,
+                                current_hospital_capacity_val, # This capacity is for creating features for other targets
+                                days=forecast_days
+                            )
+
+                            # Generate predictions for future dates using the trained model
+                            predictions = forecast_with_lags(final_model, training_data, future_df, available_features, target_col_name)
+                            future_df['Predicted'] = predictions # Add predictions to the future DataFrame
+
+                            # Display key metrics to console
+                            print(f"\n--- Final Metrics for {target_col_name} at {hospital} (using determined params) ---")
+                            print(f"{target_col_name} MAE: {avg_mae:.4f}")
+                            print(f"Training Records: {len(X)}")
+                            if best_params_for_target:
+                                print(f"Used Hyperparameters: {final_model.get_params()}") # Print all params of the final_model
+                            else:
+                                print(f"Used Hyperparameters: Default")
+                            print(f"Last {target_col_name} Value: {training_data[target_col_name].iloc[-1]:.0f}")
+
+                            # Create and display the forecast plot (optional, can be commented out for speed)
+                            # fig = plot_forecasts(
+                            #     training_data.tail(21), # Show last 21 historical points (approx. 1 week at 3 readings/day)
+                            #     future_df,
+                            #     target_col_name, # Pass the metric name for plot title/labels
+                            #     hospital
+                            # )
+                            # # st.plotly_chart(fig, use_container_width=True) # Commented out for non-Streamlit run
+
+                            # Display detailed forecast data to console
+                            print(f"\n📋 {target_col_name} Forecast Details for {hospital}:")
+                            forecast_display_df = future_df[['Date', 'Time', 'Predicted']].copy()
+                            forecast_display_df['Predicted'] = forecast_display_df['Predicted'].round(1)
+                            print(forecast_display_df)
+
+                            # Code for download button is fully commented out as it's Streamlit-specific
+                            # # Provide a download button for the forecast data
+                            # # csv_data = future_df[['Datetime', 'Hospital', 'Predicted']].copy()
+                            # # csv_data['Metric'] = target_col_name # Identify the metric in the CSV
+                            # # st.download_button( # Commented out
+                            # #     f"📥 Download {target_col_name} Forecast CSV",
+                            # #     csv_data.to_csv(index=False),
+                            # #     file_name=f"{hospital}_{target_col_name.replace(' ', '_')}_forecast.csv", # Sanitize filename
+                            # #     mime="text/csv",
+                            # #     key=f"{hospital}_{target_col_name}_download"
+                            # # )
+                            # pass # No longer needed as print statements are active
+                        except Exception as e:
+                            print(f"❌ Error during final model training or forecast generation for '{target_col_name}' at {hospital}: {str(e)}")
+                            print("Info: This might be due to issues with the dataset or model training for future predictions.")
+
+                    # st.divider() # Separator for each metric's results
+                    print("-" * 50) # Console separator
 
             # Display general forecasting insights after all forecasts are run
-            add_forecasting_insights()
+            # add_forecasting_insights() # Commented out
 
-    except Exception as e:
-        # Catch and display errors during file processing or initial data preparation
-        st.error(f"❌ Error processing file: {str(e)}")
-        st.info("Please check that your Excel file contains the required columns and data format as described below.")
+        except FileNotFoundError:
+            print(f"❌ Error: The file '{uploaded_file}' was not found. Please check the path and try again.")
+        except Exception as e:
+            # Catch and display errors during file processing or initial data preparation
+            print(f"❌ Error processing file: {str(e)}")
+            print("Info: Please check that your Excel file contains the required columns and data format.")
 
-else:
-    # Instructions for users when no file is uploaded
-    st.info("👆 Please upload an Excel file to begin forecasting.")
+    else:
+        # Instructions for users when no file is uploaded
+        print("👆 Please provide a valid Excel file path to begin forecasting.")
+        # TODO: Add more detailed instructions on expected file format if needed, similar to the commented out Streamlit expander.
+        # print("Expected file format details...")
+        #     - `Hospital Group Name`: The group the hospital belongs to.
+        #     - `Hospital`: Unique identifier for the hospital.
+        #     - `Date`: The date of the observation (e.g., '30/05/2025').
+        #     - `DayGAR`: Categorical day information (if available, e.g., 'Day X').
+        #     - `Tracker8am`, `Tracker2pm`, `Tracker8pm`: ED bed counts at 8 AM, 2 PM, 8 PM respectively.
+        #     - `TimeTotal_8am`, `TimeTotal_2pm`, `TimeTotal_8pm`: Trolley counts at 8 AM, 2 PM, 8 PM respectively.
+        #     - `AdditionalCapacityOpen Morning`: Any additional capacity opened in the morning for that day.
+        #
+        #     **Data should contain:**
+        #     - Historical ED and trolley count data.
+        #     - Data for multiple hospitals (optional, but the app supports it).
+        #     - At least **10-15 records** per hospital-metric combination for basic forecasting.
+        #     - At least **30+ records** per hospital-metric combination for more reliable forecasting.
+        #     """)
 
-    # Expandable section detailing the expected file format
-    with st.expander("📋 Expected File Format"):
-        st.markdown("""
-        **Required columns:**
-        - `Hospital Group Name`: The group the hospital belongs to.
-        - `Hospital`: Unique identifier for the hospital.
-        - `Date`: The date of the observation (e.g., '30/05/2025').
-        - `DayGAR`: Categorical day information (if available, e.g., 'Day X').
-        - `Tracker8am`, `Tracker2pm`, `Tracker8pm`: ED bed counts at 8 AM, 2 PM, 8 PM respectively.
-        - `TimeTotal_8am`, `TimeTotal_2pm`, `TimeTotal_8pm`: Trolley counts at 8 AM, 2 PM, 8 PM respectively.
-        - `AdditionalCapacityOpen Morning`: Any additional capacity opened in the morning for that day.
+# Function to encapsulate model training and MAE calculation for one iteration
+def run_forecasting_iteration(training_data_full, available_features, target_col_name, hospital_name, forecast_days, base_features, hyperparams, last_known_date, hospital_code_val, capacity_val):
+    """
+    Runs a single forecasting iteration with a given set of hyperparameters.
+    Returns the calculated MAE.
+    """
+    X_iter = training_data_full[available_features]
+    y_iter = training_data_full[target_col_name]
 
-        **Data should contain:**
-        - Historical ED and trolley count data.
-        - Data for multiple hospitals (optional, but the app supports it).
-        - At least **10-15 records** per hospital-metric combination for basic forecasting.
-        - At least **30+ records** per hospital-metric combination for more reliable forecasting.
-        """)
+    # TODO: Implement data subsetting logic here if needed (e.g., use last N months)
+    # For now, using all available historical data passed to this function.
+
+    model_iter = lgb.LGBMRegressor(
+        n_estimators=hyperparams['n_estimators'],
+        learning_rate=hyperparams['learning_rate'],
+        max_depth=hyperparams['max_depth'],
+        num_leaves=hyperparams['num_leaves'],
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.2,
+        reg_lambda=0.2,
+        verbose=-1,
+        random_state=42,
+        force_col_wise=True
+    )
+
+    current_mae = np.nan
+    if len(X_iter) >= 20: # Perform CV if enough data
+        tscv_iter = TimeSeriesSplit(n_splits=min(5, len(X_iter) // 10))
+        fold_maes_iter = []
+        for train_idx, test_idx in tscv_iter.split(X_iter):
+            X_train_fold_iter, X_test_fold_iter = X_iter.iloc[train_idx], X_iter.iloc[test_idx]
+            y_train_fold_iter, y_test_fold_iter = y_iter.iloc[train_idx], y_iter.iloc[test_idx]
+
+            if len(X_train_fold_iter) > 0 and len(X_test_fold_iter) > 0:
+                fold_model_iter = lgb.LGBMRegressor(**model_iter.get_params())
+                fold_model_iter.fit(X_train_fold_iter, y_train_fold_iter)
+                y_pred_fold_iter = fold_model_iter.predict(X_test_fold_iter)
+                fold_maes_iter.append(mean_absolute_error(y_test_fold_iter, y_pred_fold_iter))
+            else:
+                # This case should ideally not happen if len(X_iter) >= 20 and splits are reasonable
+                print(f"Warning: Skipping a CV fold due to insufficient data for {target_col_name} at {hospital_name} during hyperparameter tuning.")
+
+        if fold_maes_iter:
+            current_mae = np.mean(fold_maes_iter)
+    elif len(X_iter) > 0: # If not enough for CV, train on all data and do a simple test
+        model_iter.fit(X_iter, y_iter)
+        # Predict on the last few points of the training set as a proxy (not ideal, but better than nothing for small sets)
+        num_test_points = min(5, len(X_iter))
+        y_pred_test_iter = model_iter.predict(X_iter.tail(num_test_points))
+        current_mae = mean_absolute_error(y_iter.tail(num_test_points), y_pred_test_iter)
+    else:
+        print(f"Warning: Not enough data to train or evaluate model for {target_col_name} at {hospital_name} with current features.")
+        return np.nan
+
+
+    # The following lines for actual future forecasting can be kept if needed,
+    # but for hyperparameter tuning, only MAE on historical data (CV or simple test) is typically used.
+    # For this subtask, we are asked to print MAE, so we'll focus on that.
+    # If full forecast generation per iteration is too slow, this part can be removed from the iteration function.
+    # model_iter.fit(X_iter, y_iter) # Re-fit on full data for this iteration's params
+    # future_df_iter = create_future_dates(
+    #     pd.to_datetime(last_known_date),
+    #     hospital_name,
+    #     hospital_code_val,
+    #     capacity_val,
+    #     days=forecast_days
+    # )
+    # predictions_iter = forecast_with_lags(model_iter, training_data_full, future_df_iter, available_features, target_col_name)
+    # future_df_iter['Predicted'] = predictions_iter
+    # print(f"\n📋 Iteration Forecast Details for {target_col_name} at {hospital_name} with params {hyperparams}:")
+    # print(future_df_iter[['Date', 'Time', 'Predicted']].round(1).head())
+
+
+    return current_mae
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Emergency Department Forecasting Tool")
+    parser.add_argument("--file_path", type=str, default="sample_data.xlsx",
+                        help="Path to the Excel file containing ED data.")
+    # Add other arguments like forecast_days, hospital_option if they need to be CLI configurable
+    # parser.add_argument("--forecast_days", type=int, default=7, help="Number of days to forecast.")
+    # parser.add_argument("--hospital_option", type=str, default="All Hospitals", help="Specific hospital or 'All Hospitals'.")
+
+    args = parser.parse_args()
+
+    # Pass CLI arguments to main function
+    # For now, main directly uses the args.file_path for simplicity as other params are still hardcoded/derived in main
+    main(file_path=args.file_path) #, forecast_days=args.forecast_days, hospital_option=args.hospital_option)
