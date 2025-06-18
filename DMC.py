@@ -389,15 +389,9 @@ def predict_prophet(historical_data, future_df_features, target_column):
 
     # Add Irish holidays to Prophet model
     calendar = IrishBankHolidays()
-    # Generate holidays over the entire date range of the dataset for Prophet
     holidays_df = calendar.holidays(start=df_prophet['ds'].min(), end=future_df_features['Datetime'].max() + timedelta(days=30))
     holidays_df = pd.DataFrame({'ds': holidays_df, 'holiday': 'Irish Holiday'})
-    m.add_country_holidays(country_name='IE') # Use built-in for common holidays
-    # Add custom holidays not covered by built-in if necessary, by merging
-    # However, for 'IrishBankHolidays' we define custom rules. Using add_country_holidays is good,
-    # but also manually adding the holiday df can ensure all are covered.
-    # To keep it simple, rely on add_country_holidays for now.
-    # m.add_seasonality(name='holiday_effect', period=1, fourier_order=5, prior_scale=10) # Example for custom holiday effect
+    m.add_country_holidays(country_name='IE') 
 
     m.fit(df_prophet)
 
@@ -414,9 +408,9 @@ def predict_prophet(historical_data, future_df_features, target_column):
 
     return forecast_results
 
-def predict_hybrid(historical_data, future_df_features, features, target_column):
+def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM'):
     """
-    Hybrid forecasting: Prophet for trend/seasonality, LightGBM for residuals.
+    Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
     """
     if historical_data.empty:
@@ -449,7 +443,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column)
     # Calculate residuals for ML model training
     historical_data['residuals'] = historical_data[target_column] - historical_data['prophet_yhat']
 
-    # --- Step 2: LightGBM for residuals ---
+    # --- Step 2: ML model for residuals ---
     # Generate lags and rolling features specifically for residuals
     residual_data_for_lags, residual_lag_features = add_lag_features_smart(historical_data[['Hospital', 'Datetime', 'residuals']].copy(), 'residuals')
 
@@ -457,8 +451,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column)
     historical_data = pd.merge(historical_data, residual_data_for_lags.drop(columns=['residuals']), on=['Hospital', 'Datetime'], how='left')
     historical_data = historical_data.dropna(subset=['residuals']) # Drop rows where residuals or Prophet yhat were NaN
 
-    # Features for the LightGBM residual model:
-    # Use selected base features from the original `features` list, plus Prophet's yhat, and residual lags/rolling means.
+    # Features for the ML residual model:
     ml_residual_features = [f for f in features if f != target_column and f in historical_data.columns] # Original features
     if 'prophet_yhat' not in ml_residual_features:
         ml_residual_features.append('prophet_yhat') # Add Prophet's point forecast as a feature
@@ -469,7 +462,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column)
     y_ml_res = historical_data.dropna(subset=ml_residual_features)['residuals']
 
     if X_ml_res.empty or len(X_ml_res) < 5:
-        st.warning("Insufficient data to train LightGBM model for hybrid residuals. Falling back to Prophet only.")
+        st.warning(f"Insufficient data to train {residual_model_name} model for hybrid residuals. Falling back to Prophet only.")
         future_prophet_forecast = m_prophet.predict(future_df_features[['Datetime']].rename(columns={'Datetime': 'ds'}))
         return pd.DataFrame({
             'Predicted': np.maximum(0, future_prophet_forecast['yhat']).round(0),
@@ -478,19 +471,26 @@ def predict_hybrid(historical_data, future_df_features, features, target_column)
             'Datetime': future_df_features['Datetime']
         }, index=future_df_features.index)
 
-    # Initialize and train LightGBM model for residuals
-    ml_residual_model = lgb.LGBMRegressor(
-        n_estimators=min(500, len(X_ml_res) * 2), # Adjusted estimators for residuals
-        learning_rate=0.03, # Slightly lower learning rate for residuals
-        num_leaves=20,
-        max_depth=-1,
-        min_child_samples=10,
-        subsample=0.7,
-        colsample_bytree=0.7,
-        random_state=42,
-        n_jobs=-1,
-        objective='regression_l1'
-    )
+    # Initialize and train ML model for residuals
+    # Using a slightly different learning rate for residual models
+    if residual_model_name == 'LightGBM':
+        ml_residual_model = lgb.LGBMRegressor(
+            n_estimators=min(500, len(X_ml_res) * 2), learning_rate=0.03, num_leaves=20,
+            max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
+            random_state=42, n_jobs=-1, objective='regression_l1'
+        )
+    elif residual_model_name == 'CatBoost':
+        ml_residual_model = cb.CatBoostRegressor(
+            iterations=min(500, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
+            subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
+            verbose=False, random_state=42, allow_writing_files=False,
+            bagging_temperature=1, od_type='Iter', od_wait=20, loss_function='RMSE'
+        )
+    else:
+        st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
+        return predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM') # Fallback
+
+
     ml_residual_model.fit(X_ml_res, y_ml_res)
 
     # --- Step 3: Forecast future with hybrid model ---
@@ -590,7 +590,7 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
     ))
 
     # Add forecast intervals if requested and available
-    if show_intervals and 'Predicted_Low' in forecast_data.columns and 'Predicted_High' in forecast_data.columns:
+    if show_intervals and 'Predicted_Low' in forecast_data.columns and 'Predicted_High' in forecast_data.columns and not forecast_data['Predicted_Low'].eq(0).all(): # Check if not all zeros
         fig.add_trace(go.Scatter(
             x=pd.concat([forecast_data['Datetime'], forecast_data['Datetime'].iloc[::-1]]), # go forward then backward
             y=pd.concat([forecast_data['Predicted_High'], forecast_data['Predicted_Low'].iloc[::-1]]), # upper, then lower reversed
@@ -727,7 +727,7 @@ forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7)
 st.sidebar.header("Model Settings")
 model_option = st.sidebar.selectbox(
     "Select ML Model:",
-    options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)", "Prophet", "Prophet-LightGBM Hybrid"]
+    options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)", "Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]
 )
 
 # File uploader widget
@@ -823,7 +823,6 @@ if uploaded_file:
                     # --- Model-specific forecasting logic ---
                     if model_option == "Prophet":
                         # Prophet handles its own feature engineering and iterative prediction
-                        # It doesn't use the `features` list directly from here for training its internal model
                         if target_col_name == 'Capacity':
                             st.warning("Prophet model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
                         forecast_results = predict_prophet(hospital_data, future_df_base, target_col_name)
@@ -831,10 +830,18 @@ if uploaded_file:
                         st.info("Prophet's RMSE is not calculated using cross-validation in this application due to its specific forecasting approach.")
                         
                     elif model_option == "Prophet-LightGBM Hybrid":
-                        # Hybrid model
+                        # Hybrid model using LightGBM for residuals
                         if target_col_name == 'Capacity':
                             st.warning("Hybrid model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
-                        forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name)
+                        forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name, residual_model_name='LightGBM')
+                        avg_rmse = np.nan # Hybrid RMSE is also complex to calculate with standard CV
+                        st.info("Hybrid model's RMSE is not calculated using cross-validation in this application due to its specific forecasting approach.")
+
+                    elif model_option == "Prophet-CatBoost Hybrid":
+                        # Hybrid model using CatBoost for residuals
+                        if target_col_name == 'Capacity':
+                            st.warning("Hybrid model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
+                        forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name, residual_model_name='CatBoost')
                         avg_rmse = np.nan # Hybrid RMSE is also complex to calculate with standard CV
                         st.info("Hybrid model's RMSE is not calculated using cross-validation in this application due to its specific forecasting approach.")
 
@@ -899,7 +906,6 @@ if uploaded_file:
                              model.fit(X, y)
 
                         # Generate predictions for future dates using the trained model
-                        # For tree-based models, 'Predicted_Low' and 'Predicted_High' will be placeholders
                         forecast_results = forecast_with_lags(model, training_data, future_df_base, available_features, target_col_name)
 
 
@@ -908,14 +914,16 @@ if uploaded_file:
                     with col1:
                         st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}" if avg_rmse is not np.nan else "N/A")
                     with col2:
-                        st.metric(f"Training Records", f"{len(X)}" if model_option not in ["Prophet", "Prophet-LightGBM Hybrid"] else f"{len(hospital_data)}")
+                        # For Prophet/Hybrid, training records reflect all data passed to Prophet
+                        train_records_display = f"{len(X)}" if model_option not in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] else f"{len(hospital_data)}"
+                        st.metric(f"Training Records", train_records_display)
                     with col3:
                         last_val_display = f"{hospital_data[target_col_name].iloc[-1]:.0f}" if not hospital_data.empty else "N/A"
                         st.metric(f"Last {target_col_name} Value", last_val_display)
 
                     # Create and display the forecast plot
                     # Pass show_intervals=True if the model provides them
-                    show_intervals = model_option in ["Prophet", "Prophet-LightGBM Hybrid"]
+                    show_intervals = model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]
                     fig = plot_forecasts(
                         hospital_data.tail(21), # Show last 21 historical points (approx. 1 week at 3 readings/day)
                         forecast_results, # Use the common forecast_results DataFrame
