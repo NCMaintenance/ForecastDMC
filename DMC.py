@@ -9,6 +9,7 @@ from sklearn.ensemble import GradientBoostingRegressor # A good scikit-learn equ
 from prophet import Prophet # Import Prophet
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import RandomizedSearchCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error # Import MAE for calculation
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
