@@ -12,3 +12,4 @@ statsmodels
 shap
 numba
 lightgbm
+catboost
