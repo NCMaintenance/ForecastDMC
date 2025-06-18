@@ -529,7 +529,6 @@ if uploaded_file:
                         l2_leaf_reg=3,                    # CatBoost's default regularization
                         verbose=False,
                         random_state=42,                        allow_writing_files=False,
-                        bootstrap_type='Bayesian',         # CatBoost-specific: better for small datasets
                         bagging_temperature=1,             # Controls randomness in Bayesian bootstrap
                         od_type='Iter',                   # Overfitting detection
                         od_wait=50                        # Stop if no improvement for 50 iterations
