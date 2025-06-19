@@ -508,10 +508,10 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         )
     elif residual_model_name == 'CatBoost':
         ml_residual_model = cb.CatBoostRegressor(
-            iterations=min(1000, len(X_ml_res) * 2), learning_rate=0.1, depth=12,
+            iterations=min(500, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
             subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
             verbose=False, random_state=42, allow_writing_files=False,
-            bagging_temperature=1, od_type='Iter', od_wait=20,
+            bagging_temperature=1, od_type='Iter', od_wait=50,
             loss_function='MAE' # Changed to MAE as requested
         )
     else:
@@ -704,7 +704,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         }
         if enable_tuning:
             param_grid = {
-                'iterations': [200, 550, 1000], # Reduced for faster tuning
+                'iterations': [100, 250, 500], # Reduced for faster tuning
                 'learning_rate': [0.03, 0.05, 0.08],
                 'depth': [4, 6, 8],
                 'l2_leaf_reg': [1, 3, 5]
