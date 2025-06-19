@@ -1044,6 +1044,7 @@ if uploaded_file:
                             
                             # Generate predictions for future dates using the trained model
                             forecast_results = forecast_with_lags(model, training_data, future_df_base, available_features, target_col_name)
+                            forecast_results['Datetime'] = future_df_base['Datetime'].values
 
 
                         # --- Common display for all models ---
@@ -1057,6 +1058,9 @@ if uploaded_file:
                         with col3:
                             last_val_display = f"{hospital_data[target_col_name].iloc[-1]:.0f}" if not hospital_data.empty else "N/A"
                             st.metric(f"Last {target_col_name} Value", last_val_display)
+
+                        # Ensure 'Datetime' column is present before plotting
+                        assert 'Datetime' in forecast_results.columns, "INTERNAL ERROR: 'Datetime' column missing in forecast_results before plotting."
 
                         # Create and display the forecast plot
                         # Pass show_intervals=True for all models now that intervals are generated for tree-based too
