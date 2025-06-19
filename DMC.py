@@ -435,10 +435,14 @@ def predict_prophet(historical_data, future_df_features, target_column):
 
     return forecast_results
 
-def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM', residual_weight=1.0):
+def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM',
+                   ml_iterations=500, ml_learning_rate=0.03, ml_residual_contribution=1.0):
     """
     Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
+    ml_iterations: Number of trees/iterations for the ML residual model.
+    ml_learning_rate: Learning rate for the ML residual model.
+    ml_residual_contribution: Weight (0.0 to 1.0) of the ML residual prediction. 1.0 means full residual.
     """
     if historical_data.empty:
         st.error("Historical data for hybrid forecasting is empty. Cannot generate forecasts.")
@@ -498,17 +502,16 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             'Datetime': future_df_features['Datetime']
         }, index=future_df_features.index)
 
-    # Initialize and train ML model for residuals
-    # Using a slightly different learning rate for residual models
+    # Initialize and train ML model for residuals with dynamic parameters
     if residual_model_name == 'LightGBM':
         ml_residual_model = lgb.LGBMRegressor(
-            n_estimators=min(500, len(X_ml_res) * 2), learning_rate=0.03, num_leaves=20,
+            n_estimators=ml_iterations, learning_rate=ml_learning_rate, num_leaves=20,
             max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
             random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
         )
     elif residual_model_name == 'CatBoost':
         ml_residual_model = cb.CatBoostRegressor(
-            iterations=min(500, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
+            iterations=ml_iterations, learning_rate=ml_learning_rate, depth=5,
             subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
             verbose=False, random_state=42, allow_writing_files=False,
             bagging_temperature=1, od_type='Iter', od_wait=50,
@@ -516,7 +519,10 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         )
     else:
         st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
-        return predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM') # Fallback
+        # Recursively call with default LightGBM, but keep original hybrid settings
+        return predict_hybrid(historical_data, future_df_features, features, target_column, 
+                              residual_model_name='LightGBM', ml_iterations=ml_iterations, 
+                              ml_learning_rate=ml_learning_rate, ml_residual_contribution=ml_residual_contribution)
 
 
     ml_residual_model.fit(X_ml_res, y_ml_res)
@@ -581,7 +587,8 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             predicted_residuals.append(0)
 
     # Final hybrid prediction = Prophet base + ML residual prediction
-    hybrid_predictions = future_prophet_forecast['yhat'].values + residual_weight * np.array(predicted_residuals)
+    # Apply the ml_residual_contribution
+    hybrid_predictions = future_prophet_forecast['yhat'].values + (ml_residual_contribution * np.array(predicted_residuals))
     hybrid_predictions = np.maximum(0, hybrid_predictions).round(0)
 
     return pd.DataFrame({
@@ -813,7 +820,7 @@ model_option = st.sidebar.selectbox(
     options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)", "Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]
 )
 
-# Hyperparameter Tuning options
+# Hyperparameter Tuning options for tree-based models (non-hybrid)
 st.sidebar.subheader("Hyperparameter Tuning (Tree-based models)")
 enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
     help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
@@ -823,6 +830,27 @@ tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 1
 if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] and enable_tuning:
     st.sidebar.warning("Hyperparameter tuning is not available for Prophet or Hybrid models via this interface.")
     enable_tuning = False # Disable tuning for non-tree models
+
+# New Hyperparameter controls for Hybrid models
+hybrid_ml_iterations = 500
+hybrid_ml_learning_rate = 0.05
+hybrid_ml_residual_contribution = 1.0
+
+if "Hybrid" in model_option:
+    st.sidebar.subheader("Hybrid Model Parameters (ML Residual Component)")
+    hybrid_ml_iterations = st.sidebar.slider(
+        "ML Iterations (Number of Trees)", 100, 1500, 500, 50,
+        help="Number of boosting iterations (trees) for the ML model predicting residuals."
+    )
+    hybrid_ml_learning_rate = st.sidebar.slider(
+        "ML Learning Rate", 0.01, 0.2, 0.05, 0.01, format="%.2f",
+        help="Step size shrinkage for the ML model predicting residuals."
+    )
+    hybrid_ml_residual_contribution = st.sidebar.slider(
+        "ML Residual Contribution", 0.0, 1.0, 1.0, 0.05, format="%.2f",
+        help="Weight (0.0 to 1.0) of the ML residual prediction. 0.0 means only Prophet is used, 1.0 means full residual."
+    )
+
 
 # File uploader widget
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
@@ -941,7 +969,16 @@ if uploaded_file:
                             
                             residual_model = 'LightGBM' if model_option == "Prophet-LightGBM Hybrid" else 'CatBoost'
                             
-                            forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name, residual_model_name=residual_model)
+                            forecast_results = predict_hybrid(
+                                hospital_data, 
+                                future_df_base, 
+                                base_features, 
+                                target_col_name, 
+                                residual_model_name=residual_model,
+                                ml_iterations=hybrid_ml_iterations, # Pass new params
+                                ml_learning_rate=hybrid_ml_learning_rate, # Pass new params
+                                ml_residual_contribution=hybrid_ml_residual_contribution # Pass new params
+                            )
                             
                             # Calculate MAE for Hybrid on historical data (Prophet component's MAE)
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
@@ -1103,3 +1140,4 @@ else:
         - At least **10-15 records** per hospital-metric combination for basic forecasting.
         - At least **30+ records** per hospital-metric combination for more reliable forecasting.
         """)
+
