@@ -318,7 +318,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     current_lags = list(reversed(last_values.tolist()))
     current_lags = current_lags + [0] * (7 - len(current_lags))
 
-    # Initialize rolling statistics with historical data's tail
+    # Initialise rolling statistics with historical data's tail
     historical_mean_3 = historical_data[target_column].tail(3).mean() if len(historical_data) >= 3 else historical_data[target_column].mean()
     historical_mean_7 = historical_data[target_column].tail(7).mean() if len(historical_data) >= 7 else historical_data[target_column].mean()
 
@@ -405,7 +405,7 @@ def predict_prophet(historical_data, future_df_features, target_column):
     """
     df_prophet = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
 
-    # Initialize Prophet with sensible defaults
+    # Initialise Prophet with sensible defaults
     m = Prophet(
         daily_seasonality=True,
         weekly_seasonality=True,
@@ -498,7 +498,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             'Datetime': future_df_features['Datetime']
         }, index=future_df_features.index)
 
-    # Initialize and train ML model for residuals
+    # Initialise and train ML model for residuals
     # Using a slightly different learning rate for residual models
     if residual_model_name == 'LightGBM':
         ml_residual_model = lgb.LGBMRegressor(
@@ -531,7 +531,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     # Iteratively forecast residuals with ML model for future dates
     predicted_residuals = []
     
-    # Initialize residual lags/rolling means for future forecasting based on historical residuals
+    # Initialise residual lags/rolling means for future forecasting based on historical residuals
     last_residual_values_hist = historical_data['residuals'].tail(7).values
     current_residual_lags = list(reversed(last_residual_values_hist.tolist())) + [0] * (7 - len(last_residual_values_hist))
 
@@ -594,7 +594,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
 
 
 def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, show_intervals=False):
-    """Creates an interactive Plotly chart visualizing historical data and forecasts."""
+    """Creates an interactive Plotly chart visualising historical data and forecasts."""
     fig = go.Figure()
 
     # Add historical data trace
@@ -691,7 +691,7 @@ def add_forecasting_insights():
 @st.cache_resource # Cache the trained model for faster subsequent runs
 def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, enable_tuning: bool, tuning_iterations: int):
     """
-    Initializes and returns the selected machine learning model,
+    Initialises and returns the selected machine learning model,
     with optional hyperparameter tuning.
     """
     param_grid = {} # Define hyperparameter search space
@@ -783,7 +783,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
             estimator=model_class(**base_params),
             param_distributions=param_grid,
             n_iter=tuning_iterations,
-            scoring='neg_mean_absolute_error', # Optimize for MAE
+            scoring='neg_mean_absolute_error', # Optimise for MAE
             cv=tscv_tuning,
             verbose=0, # Suppress verbose output from GridSearchCV
             random_state=42,
@@ -800,7 +800,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         return model_class(**base_params).fit(X_train, y_train) # Fit default model if no tuning
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting (Ireland)")
+st.title("Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
 
 # Sidebar control for number of forecast days
@@ -816,7 +816,7 @@ model_option = st.sidebar.selectbox(
 # Hyperparameter Tuning options
 st.sidebar.subheader("Hyperparameter Tuning (Tree-based models)")
 enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
-    help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
+    help="Applies RandomisedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
     help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
 
@@ -916,7 +916,7 @@ if uploaded_file:
                             days=forecast_days
                         )
 
-                        avg_mae = np.nan # Initialize MAE for all models
+                        avg_mae = np.nan # Initialise MAE for all models
 
                         # --- Model-specific forecasting logic ---
                         if model_option == "Prophet":
@@ -973,7 +973,7 @@ if uploaded_file:
                             X = training_data[available_features]
                             y = training_data[target_col_name]
 
-                            # Initialize and/or tune the selected model
+                            # Initialise and/or tune the selected model
                             model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
 
                             # --- Time Series Cross-Validation for tree-based models ---
