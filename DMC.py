@@ -965,7 +965,7 @@ if uploaded_file:
                         elif model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]:
                             # Hybrid model
                             if target_col_name == 'Capacity':
-                                st.warning("Hybrid model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
+                                st.warning("Hybrid model still being worked on by Dave")
                             
                             residual_model = 'LightGBM' if model_option == "Prophet-LightGBM Hybrid" else 'CatBoost'
                             
