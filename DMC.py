@@ -503,12 +503,14 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         }, index=future_df_features.index)
 
     # Initialize and train ML model for residuals with dynamic parameters
-    if residual_model_name == 'LightGBM':
-        ml_residual_model = lgb.LGBMRegressor(
-            n_estimators=ml_iterations, learning_rate=ml_learning_rate, num_leaves=20,
-            max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
-            random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
-        )
+    ml_residual_model = get_ml_model(
+        residual_model_name,
+        X_ml_res,
+        y_ml_res,
+        enable_tuning=hybrid_model_tuning_enabled,
+        tuning_iterations=10  # or make this adjustable from UI
+    )
+
     elif residual_model_name == 'CatBoost':
         ml_residual_model = cb.CatBoostRegressor(
             iterations=ml_iterations, learning_rate=ml_learning_rate, depth=5,
@@ -827,9 +829,12 @@ enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
     help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
 
-if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] and enable_tuning:
-    st.sidebar.warning("Hyperparameter tuning is not available for Prophet or Hybrid models via this interface.")
-    enable_tuning = False # Disable tuning for non-tree models
+if model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]:
+    residual_model = 'LightGBM' if model_option == "Prophet-LightGBM Hybrid" else 'CatBoost'
+    hybrid_model_tuning_enabled = enable_tuning
+else:
+    hybrid_model_tuning_enabled = False
+
 
 # New Hyperparameter controls for Hybrid models
 hybrid_ml_iterations = 500
