@@ -800,7 +800,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         return model_class(**base_params).fit(X_train, y_train) # Fit default model if no tuning
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting")
+st.title("🏥 Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
 
 # Sidebar control for number of forecast days
