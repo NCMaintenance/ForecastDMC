@@ -85,7 +85,7 @@ def prepare_data(df):
     df_ed['TimeLabel'] = df_ed['Metric_Time_ED'].str.extract(r'([\d]+[ap]m)')
     df_trolley['TimeLabel'] = df_trolley['Metric_Time_Trolley'].str.extract(r'([\d]+[ap]m)')
 
-    # Map time labels to standardized 24-hour format (e.g., '08:00', '14:00', '20:00')
+    # Map time labels to standardised 24-hour format (e.g., '08:00', '14:00', '20:00')
     time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
     df_ed['Time'] = df_ed['TimeLabel'].map(time_map)
     df_trolley['Time'] = df_trolley['TimeLabel'].map(time_map)
@@ -318,7 +318,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     current_lags = list(reversed(last_values.tolist()))
     current_lags = current_lags + [0] * (7 - len(current_lags))
 
-    # Initialize rolling statistics with historical data's tail
+    # Initialise rolling statistics with historical data's tail
     historical_mean_3 = historical_data[target_column].tail(3).mean() if len(historical_data) >= 3 else historical_data[target_column].mean()
     historical_mean_7 = historical_data[target_column].tail(7).mean() if len(historical_data) >= 7 else historical_data[target_column].mean()
 
@@ -405,7 +405,7 @@ def predict_prophet(historical_data, future_df_features, target_column):
     """
     df_prophet = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
 
-    # Initialize Prophet with sensible defaults
+    # Initialise Prophet with sensible defaults
     m = Prophet(
         daily_seasonality=True,
         weekly_seasonality=True,
@@ -502,7 +502,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             'Datetime': future_df_features['Datetime']
         }, index=future_df_features.index)
 
-    # Initialize and train ML model for residuals with dynamic parameters
+    # Initialise and train ML model for residuals with dynamic parameters
     ml_residual_model = get_ml_model(
         residual_model_name,
         X_ml_res,
@@ -539,7 +539,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     # Iteratively forecast residuals with ML model for future dates
     predicted_residuals = []
     
-    # Initialize residual lags/rolling means for future forecasting based on historical residuals
+    # Initialise residual lags/rolling means for future forecasting based on historical residuals
     last_residual_values_hist = historical_data['residuals'].tail(7).values
     current_residual_lags = list(reversed(last_residual_values_hist.tolist())) + [0] * (7 - len(last_residual_values_hist))
 
@@ -603,7 +603,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
 
 
 def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, show_intervals=False):
-    """Creates an interactive Plotly chart visualizing historical data and forecasts."""
+    """Creates an interactive Plotly chart visualising historical data and forecasts."""
     fig = go.Figure()
 
     # Add historical data trace
@@ -692,15 +692,15 @@ def add_forecasting_insights():
         st.subheader("Understanding Your Results")
         st.markdown("""
         * **MAE (Mean Absolute Error)**: Lower values indicate better model accuracy. This metric represents the average absolute difference between the predicted values and the actual values. It is less sensitive to outliers compared to RMSE.
-        * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
-        * **Validation**: The model's performance (MAE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
+        * **Historical vs. Forecast**: The generated chart clearly visualises your past data patterns and the predicted future values, allowing for easy comparison.
+        * **Validation**: The model's performance (MAE) is calculated on a subset of your historical data, showing how well it generalises to unseen but similar data.
         * **Prediction Intervals (Forecast Low/High)**: For Prophet and Hybrid models, these directly come from the model's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
         """)
 
 @st.cache_resource # Cache the trained model for faster subsequent runs
 def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, enable_tuning: bool, tuning_iterations: int):
     """
-    Initializes and returns the selected machine learning model,
+    Initialises and returns the selected machine learning model,
     with optional hyperparameter tuning.
     """
     param_grid = {} # Define hyperparameter search space
@@ -792,7 +792,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
             estimator=model_class(**base_params),
             param_distributions=param_grid,
             n_iter=tuning_iterations,
-            scoring='neg_mean_absolute_error', # Optimize for MAE
+            scoring='neg_mean_absolute_error', # Optimise for MAE
             cv=tscv_tuning,
             verbose=0, # Suppress verbose output from GridSearchCV
             random_state=42,
@@ -809,7 +809,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         return model_class(**base_params).fit(X_train, y_train) # Fit default model if no tuning
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting (Ireland)")
+st.title("Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
 
 # Sidebar control for number of forecast days
@@ -825,7 +825,7 @@ model_option = st.sidebar.selectbox(
 # Hyperparameter Tuning options for tree-based models (non-hybrid)
 st.sidebar.subheader("Hyperparameter Tuning (Tree-based models)")
 enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
-    help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
+    help="Applies RandomisedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
     help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
 
@@ -836,25 +836,25 @@ else:
     hybrid_model_tuning_enabled = False
 
 
-# New Hyperparameter controls for Hybrid models
-hybrid_ml_iterations = 500
-hybrid_ml_learning_rate = 0.05
-hybrid_ml_residual_contribution = 1.0
+# # New Hyperparameter controls for Hybrid models
+# hybrid_ml_iterations = 500
+# hybrid_ml_learning_rate = 0.05
+# hybrid_ml_residual_contribution = 1.0
 
-if "Hybrid" in model_option:
-    st.sidebar.subheader("Hybrid Model Parameters (ML Residual Component)")
-    hybrid_ml_iterations = st.sidebar.slider(
-        "ML Iterations (Number of Trees)", 100, 1500, 500, 50,
-        help="Number of boosting iterations (trees) for the ML model predicting residuals."
-    )
-    hybrid_ml_learning_rate = st.sidebar.slider(
-        "ML Learning Rate", 0.01, 0.2, 0.05, 0.01, format="%.2f",
-        help="Step size shrinkage for the ML model predicting residuals."
-    )
-    hybrid_ml_residual_contribution = st.sidebar.slider(
-        "ML Residual Contribution", 0.0, 1.0, 1.0, 0.05, format="%.2f",
-        help="Weight (0.0 to 1.0) of the ML residual prediction. 0.0 means only Prophet is used, 1.0 means full residual."
-    )
+# if "Hybrid" in model_option:
+#     st.sidebar.subheader("Hybrid Model Parameters (ML Residual Component)")
+#     hybrid_ml_iterations = st.sidebar.slider(
+#         "ML Iterations (Number of Trees)", 100, 1500, 500, 50,
+#         help="Number of boosting iterations (trees) for the ML model predicting residuals."
+#     )
+#     hybrid_ml_learning_rate = st.sidebar.slider(
+#         "ML Learning Rate", 0.01, 0.2, 0.05, 0.01, format="%.2f",
+#         help="Step size shrinkage for the ML model predicting residuals."
+#     )
+#     hybrid_ml_residual_contribution = st.sidebar.slider(
+#         "ML Residual Contribution", 0.0, 1.0, 1.0, 0.05, format="%.2f",
+#         help="Weight (0.0 to 1.0) of the ML residual prediction. 0.0 means only Prophet is used, 1.0 means full residual."
+#     )
 
 
 # File uploader widget
@@ -949,7 +949,7 @@ if uploaded_file:
                             days=forecast_days
                         )
 
-                        avg_mae = np.nan # Initialize MAE for all models
+                        avg_mae = np.nan # Initialise MAE for all models
 
                         # --- Model-specific forecasting logic ---
                         if model_option == "Prophet":
@@ -1015,7 +1015,7 @@ if uploaded_file:
                             X = training_data[available_features]
                             y = training_data[target_col_name]
 
-                            # Initialize and/or tune the selected model
+                            # Initialise and/or tune the selected model
                             model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
 
                             # --- Time Series Cross-Validation for tree-based models ---
