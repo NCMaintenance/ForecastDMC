@@ -212,6 +212,7 @@ def add_lag_features_smart(df, target_column):
     return df_copy, lag_features
 
 
+@st.cache_data
 def create_future_dates(last_date, hospital, hospital_code, additional_capacity, days=7):
     """
     Creates a DataFrame of future dates and times with corresponding feature values
@@ -293,6 +294,7 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
 
     return pd.DataFrame(future_dates)
 
+@st.cache_data
 def forecast_with_lags(model, historical_data, future_df, features, target_column):
     """
     Generates forecasts iteratively, updating lag and rolling features
@@ -398,19 +400,24 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     }, index=future_df.index)
 
 
-def predict_prophet(historical_data, future_df_features, target_column):
+@st.cache_data
+def predict_prophet(historical_data, future_df_features, target_column,
+                    seasonality_mode, changepoint_prior_scale, seasonality_prior_scale,
+                    daily_seasonality, weekly_seasonality, yearly_seasonality):
     """
     Forecasts using Facebook Prophet.
     Returns point forecasts, lower, and upper bounds.
     """
     df_prophet = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
 
-    # Initialize Prophet with sensible defaults
+    # Initialize Prophet with configurable parameters
     m = Prophet(
-        daily_seasonality=True,
-        weekly_seasonality=True,
-        yearly_seasonality=True,
-        seasonality_mode='additive',
+        daily_seasonality=daily_seasonality,
+        weekly_seasonality=weekly_seasonality,
+        yearly_seasonality=yearly_seasonality,
+        seasonality_mode=seasonality_mode,
+        changepoint_prior_scale=changepoint_prior_scale,
+        seasonality_prior_scale=seasonality_prior_scale,
         interval_width=0.95 # Confidence interval width for yhat_lower/yhat_upper
     )
 
@@ -435,8 +442,13 @@ def predict_prophet(historical_data, future_df_features, target_column):
 
     return forecast_results
 
+@st.cache_data
 def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM',
-                   ml_iterations=500, ml_learning_rate=0.03, ml_residual_contribution=1.0):
+                   ml_iterations=500, ml_learning_rate=0.03, ml_residual_contribution=1.0,
+                   prophet_seasonality_mode='additive', prophet_changepoint_prior_scale=0.05,
+                   prophet_seasonality_prior_scale=10.0, prophet_daily_seasonality=True,
+                   prophet_weekly_seasonality=True, prophet_yearly_seasonality=True,
+                   enable_tuning: bool = False, tuning_iterations: int = 10):
     """
     Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
@@ -455,10 +467,12 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     # --- Step 1: Prophet base forecast ---
     df_prophet_train = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
     m_prophet = Prophet(
-        daily_seasonality=True,
-        weekly_seasonality=True,
-        yearly_seasonality=True,
-        seasonality_mode='additive',
+        daily_seasonality=prophet_daily_seasonality,
+        weekly_seasonality=prophet_weekly_seasonality,
+        yearly_seasonality=prophet_yearly_seasonality,
+        seasonality_mode=prophet_seasonality_mode,
+        changepoint_prior_scale=prophet_changepoint_prior_scale,
+        seasonality_prior_scale=prophet_seasonality_prior_scale,
         interval_width=0.95
     )
     m_prophet.add_country_holidays(country_name='IE') # Add Irish holidays
@@ -502,30 +516,43 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             'Datetime': future_df_features['Datetime']
         }, index=future_df_features.index)
 
-    # Initialize and train ML model for residuals with dynamic parameters
-    if residual_model_name == 'LightGBM':
-        ml_residual_model = lgb.LGBMRegressor(
-            n_estimators=ml_iterations, learning_rate=ml_learning_rate, num_leaves=20,
-            max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
-            random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
-        )
-    elif residual_model_name == 'CatBoost':
-        ml_residual_model = cb.CatBoostRegressor(
-            iterations=ml_iterations, learning_rate=ml_learning_rate, depth=5,
-            subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
-            verbose=False, random_state=42, allow_writing_files=False,
-            bagging_temperature=1, od_type='Iter', od_wait=50,
-            loss_function='MAE' # Changed to MAE as requested
-        )
+    # Initialize and train ML model for residuals
+    if enable_tuning:
+        st.info(f"Tune an ML model ({residual_model_name}) for residuals of {target_column}...")
+        # Note: effective_tuning_iterations is passed as tuning_iterations to this function
+        ml_residual_model = get_ml_model(residual_model_name, X_ml_res, y_ml_res, True, tuning_iterations)
     else:
-        st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
-        # Recursively call with default LightGBM, but keep original hybrid settings
-        return predict_hybrid(historical_data, future_df_features, features, target_column, 
-                              residual_model_name='LightGBM', ml_iterations=ml_iterations, 
-                              ml_learning_rate=ml_learning_rate, ml_residual_contribution=ml_residual_contribution)
+        st.info(f"Training ML model ({residual_model_name}) for residuals of {target_column} with pre-defined parameters...")
+        if residual_model_name == 'LightGBM':
+            ml_residual_model = lgb.LGBMRegressor(
+                n_estimators=ml_iterations, learning_rate=ml_learning_rate, num_leaves=20,
+                max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
+                random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
+            )
+        elif residual_model_name == 'CatBoost':
+            # Base parameters for CatBoost residual model when not tuning
+            # These should ideally align with some defaults or be simpler than full tuning
+            ml_residual_model = cb.CatBoostRegressor(
+                iterations=ml_iterations, learning_rate=ml_learning_rate, depth=6, # Using depth 6 as a common default
+                l2_leaf_reg=3, # Using l2_leaf_reg 3 as a common default
+                verbose=False, random_state=42, allow_writing_files=False,
+                loss_function='MAE', # Standardized to MAE
+                # bootstrap_type='Bernoulli', # If subsample < 1, but not set here by default
+                # subsample=0.8, # Example, if we want to set it
+                # od_type='Iter', od_wait=50 # Optional: for early stopping
+            )
+        else:
+            st.error(f"Unsupported residual model: {residual_model_name}. Cannot train for hybrid model.")
+            # Fallback to Prophet only if residual model is unsupported and cannot be trained
+            future_prophet_forecast = m_prophet.predict(future_df_features[['Datetime']].rename(columns={'Datetime': 'ds'}))
+            return pd.DataFrame({
+                'Predicted': np.maximum(0, future_prophet_forecast['yhat']).round(0),
+                'Predicted_Low': np.maximum(0, future_prophet_forecast['yhat_lower']).round(0),
+                'Predicted_High': np.maximum(0, future_prophet_forecast['yhat_upper']).round(0),
+                'Datetime': future_df_features['Datetime']
+            }, index=future_df_features.index)
 
-
-    ml_residual_model.fit(X_ml_res, y_ml_res)
+        ml_residual_model.fit(X_ml_res, y_ml_res)
 
     # --- Step 3: Forecast future with hybrid model ---
     # Get Prophet's future forecast
@@ -707,14 +734,17 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         model_class = cb.CatBoostRegressor
         base_params = {
             'verbose': False, 'random_state': 42, 'allow_writing_files': False,
-            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'MAE'
+            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'MAE',
+            'bootstrap_type': 'Bernoulli' # Added for subsample to be effective
         }
         if enable_tuning:
             param_grid = {
-                'iterations': [100, 250, 500], # Reduced for faster tuning
-                'learning_rate': [0.03, 0.05, 0.08],
-                'depth': [4, 6, 8],
-                'l2_leaf_reg': [1, 3, 5]
+                'iterations': [200, 500, 800, 1200],  # Increased range
+                'learning_rate': [0.01, 0.03, 0.05, 0.08, 0.1], # Expanded range
+                'depth': [4, 6, 8, 10], # Added 10
+                'l2_leaf_reg': [1, 3, 5, 7], # Expanded range
+                'subsample': [0.7, 0.85, 1.0], # Added subsample
+                'colsample_bylevel': [0.7, 0.85, 1.0] # Added colsample_bylevel
             }
         else:
             base_params['iterations'] = min(1000, len(X_train) * 3) # Default iterations
@@ -827,9 +857,42 @@ enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
     help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
 
-if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] and enable_tuning:
-    st.sidebar.warning("Hyperparameter tuning is not available for Prophet or Hybrid models via this interface.")
-    enable_tuning = False # Disable tuning for non-tree models
+# Corrected logic for handling enable_tuning with Prophet and Hybrid models
+if model_option == "Prophet":
+    if enable_tuning:
+        st.sidebar.warning("For the Prophet model, hyperparameter adjustments are made using the 'Prophet Specific Parameters' section. The general 'Enable Tuning' checkbox does not apply to Prophet itself.")
+    # Force enable_tuning to False for Prophet standalone, as its tuning is handled by specific Prophet parameters.
+    # This ensures that effective_tuning_iterations becomes 0 for Prophet, and no tuning is attempted via get_ml_model.
+    enable_tuning = False
+# For Hybrid models, 'enable_tuning' (from the checkbox) is preserved.
+# If checked, it will be passed to predict_hybrid to tune the ML residual component.
+# If not checked, predict_hybrid will use its default ML parameters.
+
+# Prophet Specific Parameters - Initialize with defaults
+prophet_seasonality_mode = 'additive'
+prophet_changepoint_prior_scale = 0.05
+prophet_seasonality_prior_scale = 10.0
+prophet_daily_seasonality = True
+prophet_weekly_seasonality = True
+prophet_yearly_seasonality = True
+
+if "Prophet" in model_option:
+    st.sidebar.subheader("Prophet Specific Parameters")
+    prophet_seasonality_mode = st.sidebar.selectbox(
+        "Seasonality Mode", options=['additive', 'multiplicative'], index=['additive', 'multiplicative'].index(prophet_seasonality_mode),
+        help="Prophet seasonality mode ('additive' or 'multiplicative')."
+    )
+    prophet_changepoint_prior_scale = st.sidebar.number_input(
+        "Changepoint Prior Scale", min_value=0.001, max_value=0.5, value=prophet_changepoint_prior_scale, step=0.001, format="%.3f",
+        help="Flexibility of automatic changepoint detection. Higher values make trend more flexible."
+    )
+    prophet_seasonality_prior_scale = st.sidebar.number_input(
+        "Seasonality Prior Scale", min_value=0.01, max_value=20.0, value=prophet_seasonality_prior_scale, step=0.01, format="%.2f",
+        help="Strength of the seasonality model. Higher values allow seasonality to fit larger fluctuations."
+    )
+    prophet_daily_seasonality = st.sidebar.checkbox("Enable Daily Seasonality", value=prophet_daily_seasonality)
+    prophet_weekly_seasonality = st.sidebar.checkbox("Enable Weekly Seasonality", value=prophet_weekly_seasonality)
+    prophet_yearly_seasonality = st.sidebar.checkbox("Enable Yearly Seasonality", value=prophet_yearly_seasonality)
 
 # New Hyperparameter controls for Hybrid models
 hybrid_ml_iterations = 1000
@@ -951,10 +1014,26 @@ if uploaded_file:
                             # Prophet handles its own feature engineering and iterative prediction
                             if target_col_name == 'Capacity':
                                 st.warning("Prophet model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
-                            forecast_results = predict_prophet(hospital_data, future_df_base, target_col_name)
+                            forecast_results = predict_prophet(
+                                hospital_data, future_df_base, target_col_name,
+                                seasonality_mode=prophet_seasonality_mode,
+                                changepoint_prior_scale=prophet_changepoint_prior_scale,
+                                seasonality_prior_scale=prophet_seasonality_prior_scale,
+                                daily_seasonality=prophet_daily_seasonality,
+                                weekly_seasonality=prophet_weekly_seasonality,
+                                yearly_seasonality=prophet_yearly_seasonality
+                            )
                             # Calculate MAE for Prophet on historical data for display
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
-                            m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
+                            m_eval = Prophet(
+                                daily_seasonality=prophet_daily_seasonality,
+                                weekly_seasonality=prophet_weekly_seasonality,
+                                yearly_seasonality=prophet_yearly_seasonality,
+                                seasonality_mode=prophet_seasonality_mode,
+                                changepoint_prior_scale=prophet_changepoint_prior_scale,
+                                seasonality_prior_scale=prophet_seasonality_prior_scale,
+                                interval_width=0.95
+                            )
                             m_eval.add_country_holidays(country_name='IE')
                             m_eval.fit(df_prophet_eval)
                             historical_prophet_preds = m_eval.predict(df_prophet_eval[['ds']])['yhat'].values
@@ -971,18 +1050,34 @@ if uploaded_file:
                             
                             forecast_results = predict_hybrid(
                                 hospital_data, 
-                                future_df_base, 
-                                base_features, 
-                                target_col_name, 
+                                future_df_base,
+                                base_features,
+                                target_col_name,
                                 residual_model_name=residual_model,
-                                ml_iterations=hybrid_ml_iterations, # Pass new params
-                                ml_learning_rate=hybrid_ml_learning_rate, # Pass new params
-                                ml_residual_contribution=hybrid_ml_residual_contribution # Pass new params
+                                ml_iterations=hybrid_ml_iterations,
+                                ml_learning_rate=hybrid_ml_learning_rate,
+                                ml_residual_contribution=hybrid_ml_residual_contribution,
+                                prophet_seasonality_mode=prophet_seasonality_mode,
+                                prophet_changepoint_prior_scale=prophet_changepoint_prior_scale,
+                                prophet_seasonality_prior_scale=prophet_seasonality_prior_scale,
+                                prophet_daily_seasonality=prophet_daily_seasonality,
+                                prophet_weekly_seasonality=prophet_weekly_seasonality,
+                                prophet_yearly_seasonality=prophet_yearly_seasonality,
+                                enable_tuning=enable_tuning,
+                                tuning_iterations=effective_tuning_iterations
                             )
                             
                             # Calculate MAE for Hybrid on historical data (Prophet component's MAE)
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
-                            m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
+                            m_eval = Prophet(
+                                daily_seasonality=prophet_daily_seasonality,
+                                weekly_seasonality=prophet_weekly_seasonality,
+                                yearly_seasonality=prophet_yearly_seasonality,
+                                seasonality_mode=prophet_seasonality_mode,
+                                changepoint_prior_scale=prophet_changepoint_prior_scale,
+                                seasonality_prior_scale=prophet_seasonality_prior_scale,
+                                interval_width=0.95
+                            )
                             m_eval.add_country_holidays(country_name='IE')
                             m_eval.fit(df_prophet_eval)
                             historical_prophet_preds = m_eval.predict(df_prophet_eval[['ds']])['yhat'].values
@@ -1011,7 +1106,9 @@ if uploaded_file:
                             y = training_data[target_col_name]
 
                             # Initialize and/or tune the selected model
-                            model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
+                            # Pass effective_tuning_iterations to get_ml_model
+                            effective_tuning_iterations = tuning_iterations if enable_tuning else 0
+                            model = get_ml_model(model_option, X, y, enable_tuning, effective_tuning_iterations)
 
                             # --- Time Series Cross-Validation for tree-based models ---
                             # If tuning was enabled, get_ml_model would have already reported the best CV MAE.
