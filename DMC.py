@@ -832,9 +832,9 @@ if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybr
     enable_tuning = False # Disable tuning for non-tree models
 
 # New Hyperparameter controls for Hybrid models
-hybrid_ml_iterations = 500
-hybrid_ml_learning_rate = 0.05
-hybrid_ml_residual_contribution = 1.0
+hybrid_ml_iterations = 1000
+hybrid_ml_learning_rate = 0.5
+hybrid_ml_residual_contribution = 0.8
 
 if "Hybrid" in model_option:
     st.sidebar.subheader("Hybrid Model Parameters (ML Residual Component)")
