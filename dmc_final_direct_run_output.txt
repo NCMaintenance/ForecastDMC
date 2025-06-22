@@ -1,0 +1,37 @@
+2025-06-20 13:21:14.514 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720
+  [33m[1mWarning:[0m to view this Streamlit app on a browser, run it with the following
+  command:
+
+    streamlit run DMC.py [ARGUMENTS]
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:14.720 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.410 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.410 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.410 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.411 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Session state does not function when running a script without `streamlit run`
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:21:18.412 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+Warning: lgb.LightGBMWarning not found, specific LightGBM warnings may not be suppressed.
+Adding Iteration 2 features...
+Shape after Iteration 2 features: (7936, 62)

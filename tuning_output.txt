@@ -1,0 +1,49 @@
+Warning: lgb.LightGBMWarning not found, specific LightGBM warnings may not be suppressed.
+Script started: Hyperparameter Tuning and MAE Re-evaluation
+Data loaded. Shape: (7936, 57)
+
+Processing Hospital: Cork University Hospital, Dev records: 2627, Test records: 19
+  Tuning for Target: ED Beds
+    GridSearchCV for ED Beds with 2 splits, test_size=21...
+    Best params for ED Beds: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 20, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Cork University Hospital - ED Beds - Tuned Test MAE: 15.60
+  Tuning for Target: Trolleys
+    GridSearchCV for Trolleys with 2 splits, test_size=21...
+    Best params for Trolleys: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 20, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Cork University Hospital - Trolleys - Tuned Test MAE: 4.24
+  Tuning for Target: Capacity
+    GridSearchCV for Capacity with 2 splits, test_size=21...
+    Best params for Capacity: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 20, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Cork University Hospital - Capacity - Tuned Test MAE: 11.04
+
+Processing Hospital: Mercy University Hospital, Dev records: 2625, Test records: 19
+  Tuning for Target: ED Beds
+    GridSearchCV for ED Beds with 2 splits, test_size=21...
+    Best params for ED Beds: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 31, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Mercy University Hospital - ED Beds - Tuned Test MAE: 6.13
+  Tuning for Target: Trolleys
+    GridSearchCV for Trolleys with 2 splits, test_size=21...
+    Best params for Trolleys: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 20, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Mercy University Hospital - Trolleys - Tuned Test MAE: 1.72
+  Tuning for Target: Capacity
+    GridSearchCV for Capacity with 2 splits, test_size=21...
+    Best params for Capacity: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 20, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Mercy University Hospital - Capacity - Tuned Test MAE: 2.25
+
+Processing Hospital: UH Kerry, Dev records: 2627, Test records: 19
+  Tuning for Target: ED Beds
+    GridSearchCV for ED Beds with 2 splits, test_size=21...
+    Best params for ED Beds: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 31, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    UH Kerry - ED Beds - Tuned Test MAE: 7.73
+  Tuning for Target: Trolleys
+    GridSearchCV for Trolleys with 2 splits, test_size=21...
+    Best params for Trolleys: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 31, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    UH Kerry - Trolleys - Tuned Test MAE: 1.94
+  Tuning for Target: Capacity
+    GridSearchCV for Capacity with 2 splits, test_size=21...
+    Best params for Capacity: {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.1, 'max_depth': 5, 'n_estimators': 200, 'num_leaves': 20, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    UH Kerry - Capacity - Tuned Test MAE: 2.72
+
+Tuned hyperparameters saved to tuned_hyperparameters_per_hospital_metric.json
+Average MAE after tuning: 5.9305
+Script finished: Hyperparameter Tuning and MAE Re-evaluation

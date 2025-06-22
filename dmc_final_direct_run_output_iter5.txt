@@ -1,0 +1,92 @@
+2025-06-20 13:29:03.241 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:16.845 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020
+  [33m[1mWarning:[0m to view this Streamlit app on a browser, run it with the following
+  command:
+
+    streamlit run DMC.py [ARGUMENTS]
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:17.020 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.247 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.247 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.247 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.249 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.249 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.249 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.249 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.249 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.249 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Session state does not function when running a script without `streamlit run`
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2025-06-20 13:29:20.250 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+Warning: lgb.LightGBMWarning not found.
+Running DMC.py directly for MAE calculation (Iter2 Features & HPs with corrected encoding)...
+Direct run: Loaded initial data, shape (7936, 57)
+DMC.py: Adding Iteration 2 features with robust categorical encoding...
+DMC.py: Shape after Iteration 2 features: (7936, 64)
+Direct run: Applied Iter2 features, shape (7936, 62)
+Direct run: Loaded tuned_hyperparameters_iter2.json
+  Direct Run - Processing Cork University Hospital - ED Beds
+    MAE (Direct Run) for Cork University Hospital - ED Beds: 14.63
+  Direct Run - Processing Cork University Hospital - Trolleys
+    MAE (Direct Run) for Cork University Hospital - Trolleys: 4.51
+  Direct Run - Processing Cork University Hospital - Capacity
+    MAE (Direct Run) for Cork University Hospital - Capacity: 5.90
+  Direct Run - Processing Mercy University Hospital - ED Beds
+    MAE (Direct Run) for Mercy University Hospital - ED Beds: 7.11
+  Direct Run - Processing Mercy University Hospital - Trolleys
+    MAE (Direct Run) for Mercy University Hospital - Trolleys: 2.58
+  Direct Run - Processing Mercy University Hospital - Capacity
+    MAE (Direct Run) for Mercy University Hospital - Capacity: 2.54
+  Direct Run - Processing UH Kerry - ED Beds
+    MAE (Direct Run) for UH Kerry - ED Beds: 7.32
+  Direct Run - Processing UH Kerry - Trolleys
+    MAE (Direct Run) for UH Kerry - Trolleys: 1.65
+  Direct Run - Processing UH Kerry - Capacity
+    MAE (Direct Run) for UH Kerry - Capacity: 4.76
+
+Final Average MAE (Direct Run with Iter2 Feats & HPs, fixed encoding): 5.6668
+Final MAE scores (iter5) from direct run saved to `final_dmc_mae_scores_iter5.txt`
+Running DMC.py directly for MAE calculation (Iter2 Features & HPs with corrected encoding)...
+Direct run: Loaded initial data, shape (7936, 57)
+DMC.py: Adding Iteration 2 features with robust categorical encoding...
+DMC.py: Shape after Iteration 2 features: (7936, 64)
+Direct run: Applied Iter2 features, shape (7936, 62)
+Direct run: Loaded tuned_hyperparameters_iter2.json
+  Direct Run - Processing Cork University Hospital - ED Beds
+    MAE (Direct Run) for Cork University Hospital - ED Beds: 14.63
+  Direct Run - Processing Cork University Hospital - Trolleys
+    MAE (Direct Run) for Cork University Hospital - Trolleys: 4.51
+  Direct Run - Processing Cork University Hospital - Capacity
+    MAE (Direct Run) for Cork University Hospital - Capacity: 5.90
+  Direct Run - Processing Mercy University Hospital - ED Beds
+    MAE (Direct Run) for Mercy University Hospital - ED Beds: 7.11
+  Direct Run - Processing Mercy University Hospital - Trolleys
+    MAE (Direct Run) for Mercy University Hospital - Trolleys: 2.58
+  Direct Run - Processing Mercy University Hospital - Capacity
+    MAE (Direct Run) for Mercy University Hospital - Capacity: 2.54
+  Direct Run - Processing UH Kerry - ED Beds
+    MAE (Direct Run) for UH Kerry - ED Beds: 7.32
+  Direct Run - Processing UH Kerry - Trolleys
+    MAE (Direct Run) for UH Kerry - Trolleys: 1.65
+  Direct Run - Processing UH Kerry - Capacity
+    MAE (Direct Run) for UH Kerry - Capacity: 4.76
+
+Final Average MAE (Direct Run with Iter2 Feats & HPs, fixed encoding): 5.6668
+Final MAE scores (iter5) from direct run saved to `final_dmc_mae_scores_iter5.txt`
+DMC.py: Adding Iteration 2 features with robust categorical encoding...
+DMC.py: Shape after Iteration 2 features: (7936, 64)

@@ -1,0 +1,59 @@
+/app/final_tuning_script.py:162: FutureWarning: Series.fillna with 'method' is deprecated and will raise in a future version. Use obj.ffill() or obj.bfill() instead.
+  hospital_data[col] = hospital_data[col].fillna(method='bfill').fillna(method='ffill').fillna(0)
+/app/final_tuning_script.py:162: FutureWarning: Series.fillna with 'method' is deprecated and will raise in a future version. Use obj.ffill() or obj.bfill() instead.
+  hospital_data[col] = hospital_data[col].fillna(method='bfill').fillna(method='ffill').fillna(0)
+/app/final_tuning_script.py:162: FutureWarning: Series.fillna with 'method' is deprecated and will raise in a future version. Use obj.ffill() or obj.bfill() instead.
+  hospital_data[col] = hospital_data[col].fillna(method='bfill').fillna(method='ffill').fillna(0)
+Warning: lgb.LightGBMWarning not found.
+Script started: Final Feature Refinement, Focused Tuning (Iter 3), and MAE Re-evaluation
+Base data loaded. Shape: (7936, 57)
+Re-applying Iteration 2 features...
+Data shape after re-applying Iter2 features: (7936, 62)
+Starting Targeted Feature Engineering (Iter 3) for ED Beds...
+Data shape after Iter3 features: (7936, 65)
+
+Processing Hospital: Cork University Hospital, Dev records: 2627, Test records: 19
+  Tuning for Target: ED Beds (Iter 3)
+    GridSearchCV for ED Beds (Iter 3) with 2 splits, test_size=21...
+    Best params for ED Beds (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 21, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Cork University Hospital - ED Beds - Tuned Test MAE (Iter 3): 15.29
+  Tuning for Target: Trolleys (Iter 3)
+    GridSearchCV for Trolleys (Iter 3) with 2 splits, test_size=21...
+    Best params for Trolleys (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 21, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Cork University Hospital - Trolleys - Tuned Test MAE (Iter 3): 3.94
+  Tuning for Target: Capacity (Iter 3)
+    GridSearchCV for Capacity (Iter 3) with 2 splits, test_size=21...
+    Best params for Capacity (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 50, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Cork University Hospital - Capacity - Tuned Test MAE (Iter 3): 3.16
+
+Processing Hospital: Mercy University Hospital, Dev records: 2625, Test records: 19
+  Tuning for Target: ED Beds (Iter 3)
+    GridSearchCV for ED Beds (Iter 3) with 2 splits, test_size=21...
+    Best params for ED Beds (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 40, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Mercy University Hospital - ED Beds - Tuned Test MAE (Iter 3): 5.55
+  Tuning for Target: Trolleys (Iter 3)
+    GridSearchCV for Trolleys (Iter 3) with 2 splits, test_size=21...
+    Best params for Trolleys (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 50, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Mercy University Hospital - Trolleys - Tuned Test MAE (Iter 3): 1.45
+  Tuning for Target: Capacity (Iter 3)
+    GridSearchCV for Capacity (Iter 3) with 2 splits, test_size=21...
+    Best params for Capacity (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 5, 'n_estimators': 1000, 'num_leaves': 31, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    Mercy University Hospital - Capacity - Tuned Test MAE (Iter 3): 1.81
+
+Processing Hospital: UH Kerry, Dev records: 2627, Test records: 19
+  Tuning for Target: ED Beds (Iter 3)
+    GridSearchCV for ED Beds (Iter 3) with 2 splits, test_size=21...
+    Best params for ED Beds (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 5, 'n_estimators': 1000, 'num_leaves': 21, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    UH Kerry - ED Beds - Tuned Test MAE (Iter 3): 9.60
+  Tuning for Target: Trolleys (Iter 3)
+    GridSearchCV for Trolleys (Iter 3) with 2 splits, test_size=21...
+    Best params for Trolleys (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 60, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    UH Kerry - Trolleys - Tuned Test MAE (Iter 3): 1.88
+  Tuning for Target: Capacity (Iter 3)
+    GridSearchCV for Capacity (Iter 3) with 2 splits, test_size=21...
+    Best params for Capacity (Iter 3): {'colsample_bytree': 0.8, 'force_col_wise': True, 'learning_rate': 0.05, 'max_depth': 7, 'n_estimators': 1000, 'num_leaves': 40, 'random_state': 42, 'reg_alpha': 0.1, 'reg_lambda': 0.1, 'subsample': 0.8, 'verbose': -1}
+    UH Kerry - Capacity - Tuned Test MAE (Iter 3): 0.70
+
+Tuned hyperparameters (Iter 3) saved to tuned_hyperparameters_iter3.json
+Average MAE after tuning (Iter 3): 4.8197
+Script finished: Final Feature Refinement, Focused Tuning (Iter 3), and MAE Re-evaluation

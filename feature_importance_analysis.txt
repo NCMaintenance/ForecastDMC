@@ -1,0 +1,70 @@
+--- LightGBM Feature Importances (Top 20 for each target) ---
+
+-- Target: ED Beds --
+Rolling_Mean_3_ED Beds    4131
+Lag_ED Beds_2             2947
+Lag_ED Beds_1             2669
+Hour                       756
+Rolling_Mean_7_ED Beds     502
+Lag_ED Beds_3              469
+Lag_ED Beds_6              352
+Lag_ED Beds_4              332
+DayOfWeek                  325
+Lag_ED Beds_5              276
+Lag_ED Beds_7              261
+Hour_cos                   216
+Capacity                   176
+DayOfMonth                 131
+WeekOfYear                 130
+Day_sin                    116
+Month_cos                  105
+Hour_sin                   102
+Hospital_Code               89
+Day_cos                     70
+dtype: int32
+
+-- Target: Trolleys --
+Rolling_Mean_3_Trolleys    3969
+Lag_Trolleys_1             2718
+Lag_Trolleys_2             2711
+Hour                        662
+Rolling_Mean_7_Trolleys     631
+Lag_Trolleys_3              471
+Lag_Trolleys_5              405
+Lag_Trolleys_6              347
+Lag_Trolleys_4              339
+Capacity                    337
+Lag_Trolleys_7              250
+Hospital_Code               248
+Hour_cos                    196
+DayOfMonth                  188
+Day_cos                     180
+DayOfWeek                   173
+WeekOfYear                  168
+Hour_sin                     98
+Month_cos                    85
+IsFriday                     78
+dtype: int32
+
+-- Target: Capacity --
+Rolling_Mean_3_Capacity    2670
+Lag_Capacity_1             1808
+Lag_Capacity_2             1679
+Hour                        972
+Rolling_Mean_7_Capacity     583
+Lag_Capacity_3              412
+Lag_Capacity_4              271
+Day_sin                     243
+Lag_Capacity_7              213
+Lag_Capacity_6              187
+WeekOfYear                  179
+DayOfWeek                   176
+DayOfMonth                  166
+Hour_sin                    147
+Hour_cos                    145
+Hospital_Code               125
+Lag_Capacity_5              124
+Day_cos                     102
+Month_cos                   100
+Month                        62
+dtype: int32

@@ -1,0 +1,161 @@
+--- ED Beds Correlations ---
+ED Beds                    1.000000
+Rolling_Mean_3_ED Beds     0.822659
+Rolling_Mean_7_ED Beds     0.804608
+Lag_ED Beds_3              0.788878
+Lag_ED Beds_6              0.734800
+Lag_ED Beds_1              0.551471
+Rolling_Mean_7_Capacity    0.513071
+Rolling_Mean_3_Capacity    0.511543
+Lag_Capacity_1             0.498693
+Capacity                   0.498562
+Lag_ED Beds_2              0.496698
+Lag_Capacity_2             0.487875
+Lag_Capacity_3             0.475338
+Lag_Capacity_4             0.472325
+Lag_ED Beds_4              0.456639
+Lag_Capacity_5             0.451145
+Lag_ED Beds_5              0.438390
+Lag_ED Beds_7              0.433203
+Lag_Trolleys_2             0.431683
+Lag_Capacity_6             0.425864
+Lag_Capacity_7             0.420817
+Hour                       0.414811
+Lag_Trolleys_1             0.404142
+Rolling_Mean_3_Trolleys    0.388561
+Lag_Trolleys_5             0.381478
+Rolling_Mean_7_Trolleys    0.369687
+Lag_Trolleys_4             0.367526
+Lag_Trolleys_7             0.304597
+IsPeakHour                 0.294163
+Trolleys                   0.205354
+Lag_Trolleys_3             0.203492
+Hour_cos                   0.201270
+Lag_Trolleys_6             0.153390
+Day_sin                    0.128000
+IsMonday                   0.057834
+Month_sin                  0.039026
+IsFriday                   0.033017
+DayOfMonth                 0.006166
+IsWinter                   0.001689
+Month_cos                 -0.005352
+Day_cos                   -0.005922
+Month                     -0.018752
+WeekOfYear                -0.019619
+IsSummer                  -0.019782
+Quarter                   -0.022080
+IsHoliday                 -0.025483
+DayOfWeek                 -0.147994
+IsWeekend                 -0.163115
+IsLowHour                 -0.424276
+Hour_sin                  -0.434659
+Hospital_Code             -0.574779
+Name: ED Beds, dtype: float64
+
+--- Trolleys Correlations ---
+Trolleys                   1.000000
+Rolling_Mean_3_Trolleys    0.883228
+Rolling_Mean_7_Trolleys    0.779544
+Lag_Trolleys_3             0.738838
+Lag_Trolleys_1             0.723289
+Lag_Trolleys_2             0.643363
+Lag_Trolleys_6             0.502883
+Lag_Trolleys_4             0.499418
+Capacity                   0.492624
+Rolling_Mean_3_Capacity    0.482817
+Lag_Capacity_1             0.466754
+Lag_Capacity_2             0.442355
+Rolling_Mean_7_Capacity    0.437274
+Lag_ED Beds_1              0.424323
+Lag_Trolleys_5             0.418162
+Lag_Capacity_3             0.408714
+Rolling_Mean_3_ED Beds     0.407444
+Lag_ED Beds_2              0.384687
+Lag_ED Beds_4              0.365202
+Lag_Capacity_4             0.363658
+Rolling_Mean_7_ED Beds     0.363197
+Lag_Capacity_5             0.334115
+Lag_ED Beds_7              0.327004
+Lag_ED Beds_5              0.321427
+Lag_Capacity_6             0.311959
+Day_sin                    0.306985
+Lag_Trolleys_7             0.293531
+Lag_Capacity_7             0.282586
+Hour_sin                   0.262083
+IsLowHour                  0.257686
+ED Beds                    0.205354
+Lag_ED Beds_3              0.177904
+Month_cos                  0.160074
+Lag_ED Beds_6              0.134491
+IsWinter                   0.125049
+Day_cos                    0.085862
+IsMonday                   0.066852
+Month_sin                  0.059417
+DayOfMonth                -0.024701
+IsHoliday                 -0.029023
+Quarter                   -0.089301
+WeekOfYear                -0.099131
+Month                     -0.101723
+IsFriday                  -0.109332
+Hour_cos                  -0.113045
+IsSummer                  -0.122585
+IsPeakHour                -0.170415
+IsWeekend                 -0.244263
+Hour                      -0.247177
+DayOfWeek                 -0.264532
+Hospital_Code             -0.320616
+Name: Trolleys, dtype: float64
+
+--- Capacity Correlations ---
+Capacity                   1.000000
+Rolling_Mean_3_Capacity    0.959549
+Lag_Capacity_1             0.928600
+Rolling_Mean_7_Capacity    0.880386
+Lag_Capacity_2             0.857199
+Lag_Capacity_3             0.785799
+Lag_Capacity_4             0.744128
+Lag_Capacity_5             0.702478
+Lag_Capacity_6             0.660845
+Lag_Capacity_7             0.641448
+Rolling_Mean_7_ED Beds     0.589925
+Rolling_Mean_3_ED Beds     0.582864
+Rolling_Mean_7_Trolleys    0.559354
+Rolling_Mean_3_Trolleys    0.558233
+Lag_Trolleys_1             0.503535
+Lag_Trolleys_2             0.499631
+ED Beds                    0.498562
+Trolleys                   0.492624
+Lag_ED Beds_1              0.481489
+Lag_Trolleys_3             0.478552
+Lag_ED Beds_2              0.471052
+Lag_ED Beds_3              0.469734
+Lag_ED Beds_4              0.459267
+Lag_Trolleys_4             0.455578
+Lag_ED Beds_5              0.447647
+Lag_ED Beds_6              0.447525
+Lag_ED Beds_7              0.447476
+Lag_Trolleys_5             0.429079
+Lag_Trolleys_6             0.388066
+Lag_Trolleys_7             0.360453
+Day_sin                    0.182791
+Month_cos                  0.130250
+IsWinter                   0.123685
+Month_sin                  0.117068
+IsMonday                   0.036649
+IsFriday                   0.018727
+IsPeakHour                 0.000221
+Hour_cos                   0.000213
+Hour                       0.000191
+IsLowHour                 -0.000110
+Hour_sin                  -0.000146
+Day_cos                   -0.006028
+DayOfMonth                -0.031662
+IsHoliday                 -0.040612
+IsSummer                  -0.120504
+Quarter                   -0.121326
+Month                     -0.131645
+WeekOfYear                -0.134338
+DayOfWeek                 -0.160544
+IsWeekend                 -0.196904
+Hospital_Code             -0.400357
+Name: Capacity, dtype: float64

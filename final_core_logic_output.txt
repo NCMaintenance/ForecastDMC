@@ -1,0 +1,28 @@
+Warning: lgb.LightGBMWarning not found.
+Running final_core_logic.py for MAE calculation (Iter2 Features & HPs)...
+Direct run: Loaded initial data, shape (7936, 57)
+Adding Iteration 2 features...
+Shape after Iteration 2 features: (7936, 62)
+Direct run: Applied Iter2 features, shape (7936, 62)
+Direct run: Loaded tuned_hyperparameters_iter2.json
+  Direct Run - Processing Cork University Hospital - ED Beds
+    MAE (Direct Run) for Cork University Hospital - ED Beds: 36.10
+  Direct Run - Processing Cork University Hospital - Trolleys
+    MAE (Direct Run) for Cork University Hospital - Trolleys: 5.86
+  Direct Run - Processing Cork University Hospital - Capacity
+    MAE (Direct Run) for Cork University Hospital - Capacity: 9.86
+  Direct Run - Processing Mercy University Hospital - ED Beds
+    MAE (Direct Run) for Mercy University Hospital - ED Beds: 13.90
+  Direct Run - Processing Mercy University Hospital - Trolleys
+    MAE (Direct Run) for Mercy University Hospital - Trolleys: 1.82
+  Direct Run - Processing Mercy University Hospital - Capacity
+    MAE (Direct Run) for Mercy University Hospital - Capacity: 2.83
+  Direct Run - Processing UH Kerry - ED Beds
+    MAE (Direct Run) for UH Kerry - ED Beds: 19.07
+  Direct Run - Processing UH Kerry - Trolleys
+    MAE (Direct Run) for UH Kerry - Trolleys: 1.65
+  Direct Run - Processing UH Kerry - Capacity
+    MAE (Direct Run) for UH Kerry - Capacity: 8.88
+
+Final Average MAE (Direct Run with Iter2 Feats & HPs): 11.1076
+Final MAE scores from direct run saved to `final_dmc_mae_scores.txt`

@@ -1,0 +1,11 @@
+Final Average MAE (Iter2 Features & HPs - Direct Run): 11.1076
+
+Hospital: Cork University Hospital, Target: ED Beds, MAE: 36.1028
+Hospital: Cork University Hospital, Target: Trolleys, MAE: 5.8566
+Hospital: Cork University Hospital, Target: Capacity, MAE: 9.8649
+Hospital: Mercy University Hospital, Target: ED Beds, MAE: 13.8950
+Hospital: Mercy University Hospital, Target: Trolleys, MAE: 1.8186
+Hospital: Mercy University Hospital, Target: Capacity, MAE: 2.8325
+Hospital: UH Kerry, Target: ED Beds, MAE: 19.0664
+Hospital: UH Kerry, Target: Trolleys, MAE: 1.6475
+Hospital: UH Kerry, Target: Capacity, MAE: 8.8838

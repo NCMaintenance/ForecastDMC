@@ -1,0 +1,18 @@
+Loading data...
+Data loaded successfully. Shape: (7936, 57)
+Starting Correlation Analysis...
+Correlation analysis saved to correlation_analysis.txt
+Starting Feature Importance Analysis...
+Loaded hyperparameters from best_hyperparameters.json
+  Training model for feature importance of: ED Beds
+    Features for ED Beds model (31): ['Capacity', 'DayOfMonth', 'DayOfWeek', 'Day_cos', 'Day_sin']... (first 5 shown)
+    Successfully trained model for ED Beds and extracted importances.
+  Training model for feature importance of: Trolleys
+    Features for Trolleys model (31): ['Capacity', 'DayOfMonth', 'DayOfWeek', 'Day_cos', 'Day_sin']... (first 5 shown)
+    Successfully trained model for Trolleys and extracted importances.
+  Training model for feature importance of: Capacity
+    Features for Capacity model (30): ['DayOfMonth', 'DayOfWeek', 'Day_cos', 'Day_sin', 'Hospital_Code']... (first 5 shown)
+    Successfully trained model for Capacity and extracted importances.
+Feature importance analysis saved to feature_importance_analysis.txt
+SHAP analysis was skipped for this subtask.
+Analysis script finished.
