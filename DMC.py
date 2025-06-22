@@ -435,7 +435,7 @@ def predict_prophet(historical_data, future_df_features, target_column):
 
     return forecast_results
 
-def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM', residual_weight=1.0):
+def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM'):
     """
     Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
@@ -581,7 +581,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             predicted_residuals.append(0)
 
     # Final hybrid prediction = Prophet base + ML residual prediction
-    hybrid_predictions = future_prophet_forecast['yhat'].values + residual_weight * np.array(predicted_residuals)
+    hybrid_predictions = future_prophet_forecast['yhat'].values + np.array(predicted_residuals)
     hybrid_predictions = np.maximum(0, hybrid_predictions).round(0)
 
     return pd.DataFrame({
@@ -682,9 +682,9 @@ def add_forecasting_insights():
 
         st.subheader("Understanding Your Results")
         st.markdown("""
-        * **MAE (Mean Absolute Error)**: Lower values indicate better model accuracy. This metric represents the average absolute difference between the predicted values and the actual values. It is less sensitive to outliers compared to RMSE.
+        * **RMSE (Root Mean Square Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions.
         * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
-        * **Validation**: The model's performance (MAE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
+        * **Validation**: The model's performance (RMSE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
         * **Prediction Intervals (Forecast Low/High)**: For Prophet and Hybrid models, these directly come from the model's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
         """)
 
@@ -700,7 +700,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         model_class = cb.CatBoostRegressor
         base_params = {
             'verbose': False, 'random_state': 42, 'allow_writing_files': False,
-            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'MAE'
+            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'RMSE'
         }
         if enable_tuning:
             param_grid = {
@@ -783,7 +783,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
             estimator=model_class(**base_params),
             param_distributions=param_grid,
             n_iter=tuning_iterations,
-            scoring='neg_mean_absolute_error', # Optimize for MAE
+            scoring='neg_root_mean_squared_error', # Optimize for RMSE
             cv=tscv_tuning,
             verbose=0, # Suppress verbose output from GridSearchCV
             random_state=42,
@@ -791,7 +791,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         )
         random_search.fit(X_train, y_train)
         st.success(f"✅ Tuning complete. Best parameters for {model_name}: {random_search.best_params_}")
-        st.info(f"Best CV MAE during tuning: {-random_search.best_score_:.2f}")
+        st.info(f"Best CV RMSE during tuning: {-random_search.best_score_:.2f}")
         return random_search.best_estimator_
     else:
         if enable_tuning and len(X_train) < 20:
@@ -800,7 +800,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         return model_class(**base_params).fit(X_train, y_train) # Fit default model if no tuning
 
 # --- Streamlit UI ---
-st.title("Emergency Department Forecasting (Ireland)")
+st.title("🏥 Emergency Department Forecasting")
 st.markdown("Upload your ED Excel file, select hospital(s), and generate 7-day forecasts.")
 
 # Sidebar control for number of forecast days
@@ -916,7 +916,7 @@ if uploaded_file:
                             days=forecast_days
                         )
 
-                        avg_mae = np.nan # Initialize MAE for all models
+                        avg_rmse = np.nan # Initialize RMSE for all models
 
                         # --- Model-specific forecasting logic ---
                         if model_option == "Prophet":
@@ -924,15 +924,15 @@ if uploaded_file:
                             if target_col_name == 'Capacity':
                                 st.warning("Prophet model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
                             forecast_results = predict_prophet(hospital_data, future_df_base, target_col_name)
-                            # Calculate MAE for Prophet on historical data for display
+                            # Calculate RMSE for Prophet on historical data for display
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
                             m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
                             m_eval.add_country_holidays(country_name='IE')
                             m_eval.fit(df_prophet_eval)
                             historical_prophet_preds = m_eval.predict(df_prophet_eval[['ds']])['yhat'].values
                             historical_prophet_preds = np.maximum(0, historical_prophet_preds).round(0)
-                            avg_mae = mean_absolute_error(hospital_data[target_col_name].values, historical_prophet_preds)
-                            st.info(f"Prophet's training MAE for {target_col_name}: {avg_mae:.2f} (on historical data)")
+                            avg_rmse = np.sqrt(mean_squared_error(hospital_data[target_col_name].values, historical_prophet_preds))
+                            st.info(f"Prophet's training RMSE for {target_col_name}: {avg_rmse:.2f} (on historical data)")
                             
                         elif model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]:
                             # Hybrid model
@@ -943,15 +943,15 @@ if uploaded_file:
                             
                             forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name, residual_model_name=residual_model)
                             
-                            # Calculate MAE for Hybrid on historical data (Prophet component's MAE)
+                            # Calculate RMSE for Hybrid on historical data (Prophet component's RMSE)
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
                             m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
                             m_eval.add_country_holidays(country_name='IE')
                             m_eval.fit(df_prophet_eval)
                             historical_prophet_preds = m_eval.predict(df_prophet_eval[['ds']])['yhat'].values
                             historical_prophet_preds = np.maximum(0, historical_prophet_preds).round(0)
-                            avg_mae = mean_absolute_error(hospital_data[target_col_name].values, historical_prophet_preds)
-                            st.info(f"Hybrid model's base Prophet training MAE for {target_col_name}: {avg_mae:.2f} (on historical data)")
+                            avg_rmse = np.sqrt(mean_squared_error(hospital_data[target_col_name].values, historical_prophet_preds))
+                            st.info(f"Hybrid model's base Prophet training RMSE for {target_col_name}: {avg_rmse:.2f} (on historical data)")
 
                         else: # Tree-based models (CatBoost, LightGBM, XGBoost, GradientBoosting)
                             # Add lag and rolling features specifically for the current target column
@@ -977,11 +977,11 @@ if uploaded_file:
                             model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
 
                             # --- Time Series Cross-Validation for tree-based models ---
-                            # If tuning was enabled, get_ml_model would have already reported the best CV MAE.
-                            # Otherwise, calculate MAE for the default model.
+                            # If tuning was enabled, get_ml_model would have already reported the best CV RMSE.
+                            # Otherwise, calculate RMSE for the default model.
                             if not enable_tuning and len(X) >= 20:
                                 tscv = TimeSeriesSplit(n_splits=min(5, max(1, len(X) // 10)))
-                                fold_maes = []
+                                fold_rmses = []
                                 for fold_idx, (train_index, test_index) in enumerate(tscv.split(X)):
                                     X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
                                     y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
@@ -990,20 +990,20 @@ if uploaded_file:
                                         fold_model = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0) # No tuning in CV folds
                                         y_pred_fold = fold_model.predict(X_test_fold)
                                         y_pred_fold = np.maximum(0, y_pred_fold).round(0)
-                                        fold_maes.append(mean_absolute_error(y_test_fold, y_pred_fold))
+                                        fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
                                     else:
                                         st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
 
-                                if fold_maes:
-                                    avg_mae = np.mean(fold_maes)
-                                    st.info(f"Cross-Validation MAE for {target_col_name}: {avg_mae:.2f} (Avg. over {len(fold_maes)} folds)")
+                                if fold_rmses:
+                                    avg_rmse = np.mean(fold_rmses)
+                                    st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
                                 else:
                                     st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
-                            elif not enable_tuning and len(X) > 0: # Fallback to training MAE if not enough data for CV
+                            elif not enable_tuning and len(X) > 0: # Fallback to training RMSE if not enough data for CV
                                 y_pred_train = model.predict(X)
                                 y_pred_train = np.maximum(0, y_pred_train).round(0)
-                                avg_mae = mean_absolute_error(y, y_pred_train)
-                                st.info(f"Training MAE for {target_col_name}: {avg_mae:.2f} (Trained on all available data)")
+                                avg_rmse = np.sqrt(mean_squared_error(y, y_pred_train))
+                                st.info(f"Training RMSE for {target_col_name}: {avg_rmse:.2f} (Trained on all available data)")
                             
                             # Generate predictions for future dates using the trained model
                             forecast_results = forecast_with_lags(model, training_data, future_df_base, available_features, target_col_name)
@@ -1012,7 +1012,7 @@ if uploaded_file:
                         # --- Common display for all models ---
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric(f"{target_col_name} MAE", f"{avg_mae:.2f}" if avg_mae is not np.nan else "N/A")
+                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}" if avg_rmse is not np.nan else "N/A")
                         with col2:
                             # For Prophet/Hybrid, training records reflect all data passed to Prophet
                             train_records_display = f"{len(X)}" if model_option not in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] else f"{len(hospital_data)}"
