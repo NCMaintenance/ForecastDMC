@@ -1,16 +1,14 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# Import all required ML libraries
 import lightgbm as lgb
 import xgboost as xgb
 import catboost as cb
-from sklearn.ensemble import GradientBoostingRegressor # A good scikit-learn equivalent
-from prophet import Prophet # Import Prophet
+from sklearn.ensemble import GradientBoostingRegressor
+from prophet import Prophet
 from datetime import datetime, timedelta
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.metrics import mean_squared_error, mean_absolute_error # Import MAE for calculation
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
 from dateutil.rrule import MO
@@ -23,13 +21,13 @@ import warnings
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.validation")
 try:
-    warnings.filterwarnings("ignore", category=lgb.LightGBMWarning)
+    warnings.filterwarnings("ignore", category=lgb.LightGBM.LGBMRegressor.LightGBMWarning) # Adjusted for proper access
 except AttributeError:
     print("Warning: lgb.LightGBMWarning not found, specific LightGBM warnings may not be suppressed.")
 
 print("Script started: New Feature Engineering, Hyperparameter Tuning (Iter 2), and MAE Re-evaluation")
 
-# --- Define Irish Bank Holidays ---
+# --- Define Irish Bank Holidays
 class IrishBankHolidays(AbstractHolidayCalendar):
     """
     Defines the rules for Irish Bank Holidays.
@@ -41,7 +39,6 @@ class IrishBankHolidays(AbstractHolidayCalendar):
         Holiday("St. Patrick's Day", month=3, day=17, observance=nearest_workday),
         # Easter Monday calculation for AbstractHolidayCalendar is complex and often needs external logic
         # For simplicity and to match the previous script's comment, we'll keep it as a placeholder.
-        # The 'IsHoliday' feature generated in prepare_data will rely on a simpler 'isin' check for pre-defined holidays.
         Holiday("May Day", month=5, day=1, offset=DateOffset(weekday=MO(1))),
         Holiday("June Bank Holiday", month=6, day=1, offset=DateOffset(weekday=MO(1))),
         Holiday("August Bank Holiday", month=8, day=1, offset=DateOffset(weekday=MO(1))),
@@ -63,44 +60,52 @@ def prepare_data(df):
         'Tracker8am': 'ED_8am',
         'Tracker2pm': 'ED_2pm',
         'Tracker8pm': 'ED_8pm',
-        'TimeTotal_8am': 'Trolley_8am',
-        'TimeTotal_2pm': 'Trolley_2pm',
-        'TimeTotal_8pm': 'Trolley_8pm',
+        'Time Total_8am': 'Trolley_8am',
+        'Time Total_2pm': 'Trolley_2pm',
+        'Time Total_8pm': 'Trolley_8pm',
         'AdditionalCapacityOpen Morning': 'Additional_Capacity'
     })
+
     # Fill Additional_Capacity across the day for each hospital and date
     # This assumes Additional_Capacity is constant for a given Hospital and Date.
     df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
     df['Additional_Capacity'] = df['Additional_Capacity'].fillna(0)
+
     # Define common id_vars for melting. DayGAR is removed as it's not used as a feature
     # and its future values are not easily predictable for forecasting.
     common_id_vars = ['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity']
+
     # Melt ED counts into a long format
     df_ed = pd.melt(
         df,
         id_vars=common_id_vars,
         value_vars=['ED_8am', 'ED_2pm', 'ED_8pm'],
         var_name='Metric_Time_ED', # Temporary column to extract time
-        value_name='ED Beds'      # The target column for ED data
+        value_name='ED Beds' # The target column for ED data
     )
+
     # Melt Trolley counts into a long format
     df_trolley = pd.melt(
         df,
         id_vars=common_id_vars,
         value_vars=['Trolley_8am', 'Trolley_2pm', 'Trolley_8pm'],
         var_name='Metric_Time_Trolley', # Temporary column to extract time
-        value_name='Trolleys'          # The target column for Trolley data
+        value_name='Trolleys' # The target column for Trolley data
     )
+
     # Extract time label (e.g., '8am', '2pm', '8pm') from the temporary metric_time columns
     df_ed['TimeLabel'] = df_ed['Metric_Time_ED'].str.extract(r'([\d]+[ap]m)')
     df_trolley['TimeLabel'] = df_trolley['Metric_Time_Trolley'].str.extract(r'([\d]+[ap]m)')
+
     # Map time labels to standardized 24-hour format (e.g., '08:00', '14:00', '20:00')
     time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
     df_ed['Time'] = df_ed['TimeLabel'].map(time_map)
     df_trolley['Time'] = df_trolley['TimeLabel'].map(time_map)
+
     # Drop temporary columns before merging to avoid redundancy
     df_ed = df_ed.drop(columns=['Metric_Time_ED', 'TimeLabel'])
     df_trolley = df_trolley.drop(columns=['Metric_Time_Trolley', 'TimeLabel'])
+
     # Merge the two melted dataframes. This brings 'ED Beds' and 'Trolleys' side-by-side
     # for each unique combination of identifier columns and 'Time'.
     df_merged = pd.merge(
@@ -109,29 +114,35 @@ def prepare_data(df):
         on=['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity', 'Time'], # DayGAR removed
         how='inner' # Use inner join to ensure only complete records (both ED and Trolley for a given time) are kept
     )
+
     # Convert 'ED Beds' and 'Trolleys' to numeric, coercing errors to NaN
     df_merged['ED Beds'] = pd.to_numeric(df_merged['ED Beds'], errors='coerce')
     df_merged['Trolleys'] = pd.to_numeric(df_merged['Trolleys'], errors='coerce')
+
     # Drop rows where either 'ED Beds' or 'Trolleys' values are missing
     df_merged = df_merged.dropna(subset=['ED Beds', 'Trolleys'])
+
     # Rename 'Additional_Capacity' to 'Capacity' to match the desired output
     df_merged = df_merged.rename(columns={'Additional_Capacity': 'Capacity'})
+
     # Create a unified Datetime column for time-series analysis
     df_merged['Datetime'] = pd.to_datetime(df_merged['Date'].astype(str) + ' ' + df_merged['Time'])
+
     # Sort the data by Hospital and Datetime, which is crucial for time-series operations like lags
     df_merged = df_merged.sort_values(by=['Hospital', 'Datetime']).reset_index(drop=True)
 
-    # --- Feature Engineering ---
+    # Feature Engineering
     # Extract various time-based features
     df_merged['Hour'] = df_merged['Datetime'].dt.hour
     df_merged['DayOfWeek'] = df_merged['Datetime'].dt.dayofweek
     df_merged['DayOfMonth'] = df_merged['Datetime'].dt.day
     df_merged['Month'] = df_merged['Datetime'].dt.month
     df_merged['Quarter'] = df_merged['Datetime'].dt.quarter
-    df_merged['WeekOfYear'] = df_merged['Datetime'].dt.isocalendar().week
+    df_merged['WeekOfYear'] = df_merged['Datetime'].dt.isocalendar().week.astype(int) # Convert to int
     df_merged['IsWeekend'] = df_merged['DayOfWeek'].isin([5, 6]).astype(int) # Binary indicator for weekend
     df_merged['IsMonday'] = (df_merged['DayOfWeek'] == 0).astype(int) # Binary indicator for Monday
     df_merged['IsFriday'] = (df_merged['DayOfWeek'] == 4).astype(int) # Binary indicator for Friday
+
     # Apply cyclical encoding to capture periodicity in time features
     df_merged['Hour_sin'] = np.sin(2 * np.pi * df_merged['Hour'] / 24)
     df_merged['Hour_cos'] = np.cos(2 * np.pi * df_merged['Hour'] / 24)
@@ -139,6 +150,7 @@ def prepare_data(df):
     df_merged['Day_cos'] = np.cos(2 * np.pi * df_merged['DayOfWeek'] / 7)
     df_merged['Month_sin'] = np.sin(2 * np.pi * df_merged['Month'] / 12)
     df_merged['Month_cos'] = np.cos(2 * np.pi * df_merged['Month'] / 12)
+
     # Add Irish bank holidays as a feature
     calendar = IrishBankHolidays()
     try:
@@ -147,16 +159,19 @@ def prepare_data(df):
         df_merged['IsHoliday'] = df_merged['Datetime'].dt.normalize().isin(holidays).astype(int)
     except Exception: # Catch any errors during holiday generation
         df_merged['IsHoliday'] = 0 # Default to 0 if holidays cannot be determined
+
     # Add seasonal indicators
     df_merged['IsSummer'] = df_merged['Month'].isin([6, 7, 8]).astype(int)
     df_merged['IsWinter'] = df_merged['Month'].isin([12, 1, 2]).astype(int)
+
     # Add peak/low hour indicators
-    df_merged['IsPeakHour'] = df_merged['Hour'].isin([20]).astype(int) # 8 PM is often a peak time
-    df_merged['IsLowHour'] = df_merged['Hour'].isin([8]).astype(int)  # 8 AM is often a lower time
+    df_merged['IsPeakHour'] = df_merged['Hour'].isin([20]).astype(int) #8 PM is often a peak time
+    df_merged['IsLowHour'] = df_merged['Hour'].isin([8]).astype(int) #8 AM is often a lower time
+
     # Encode Hospital names into numerical codes for model consumption
     df_merged['Hospital_Code'] = df_merged['Hospital'].astype('category').cat.codes
 
-    # --- Advanced Feature Engineering (Moved here from main script) ---
+    # --- Advanced Feature Engineering (Moved here from main script)
     print("Starting Advanced Feature Engineering within prepare_data...")
 
     # 1. Interaction Features
@@ -174,7 +189,6 @@ def prepare_data(df):
         df_merged['Capacity_Hour_Interaction'] = 0 # Add column to avoid missing feature errors later
 
     # 2. Holiday Proximity Features
-    # Generate a list of actual holiday dates within the data's range and a bit beyond for next holiday calculation
     actual_holidays = []
     if not df_merged.empty:
         # Re-use the calendar from above
@@ -190,10 +204,10 @@ def prepare_data(df):
         df_merged['DaysFromLastHoliday'] = 0
     else:
         df_merged['DaysToNextHoliday'] = df_merged['Datetime'].apply(
-            lambda x: min([ (h - x.normalize()).days for h in actual_holidays if h >= x.normalize() ], default=365)
+            lambda x: min([(h - x.normalize()).days for h in actual_holidays if h >= x.normalize()], default=365)
         )
         df_merged['DaysFromLastHoliday'] = df_merged['Datetime'].apply(
-            lambda x: min([ (x.normalize() - h).days for h in actual_holidays if h <= x.normalize() ], default=365)
+            lambda x: min([(x.normalize() - h).days for h in actual_holidays if h <= x.normalize()], default=365)
         )
         # Fill default (e.g. 365) for dates far from any holiday or if list is empty before/after
         df_merged['DaysToNextHoliday'] = df_merged['DaysToNextHoliday'].fillna(365) # If no next holiday found (e.g. at end of list)
@@ -205,40 +219,50 @@ def prepare_data(df):
 @st.cache_data
 def add_lag_features_smart(df, target_column):
     """
-    Adds lag features intelligently to the DataFrame based on available data for a specific target column.
-    Lag features are time-shifted values of the target, useful for capturing temporal dependencies.
+    Adds lag features intelligently to the DataFrame based on available data for a specific
+    target column. Lag features are time-shifted values of the target, useful for capturing temporal
+    dependencies.
     This function now applies lags and rolling features per hospital group.
     This function is cached to speed up re-runs if the input data doesn't change.
     """
     df_copy = df.copy() # Work on a copy to avoid modifying the original DataFrame during groupby operations
     lag_features = []
+
     # Ensure the DataFrame is sorted by Hospital and Datetime before group-wise operations
     df_copy = df_copy.sort_values(by=['Hospital', 'Datetime'])
+
     # Apply lags and rolling means grouped by hospital
     # This is crucial to ensure lags are only calculated within each hospital's time series
     for hospital_name, hospital_group in df_copy.groupby('Hospital'):
-        # Determine maximum safe lag based on the size of the filtered data for *this* hospital group
+        # Determine maximum safe lag based on the size of the filtered data for *this* hospital
         max_safe_lag = min(7, len(hospital_group) // 4)
+
         if max_safe_lag < 1:
             # st.warning(f"Very limited data ({len(hospital_group)} records) for {hospital_name}. Skipping lag features for {target_column}.")
             continue
+
         # Add lag features for the current target_column (e.g., 'ED Beds', 'Trolleys', 'Capacity')
         for i in range(1, max_safe_lag + 1):
             lag_col = f'Lag_{target_column}_{i}' # Lag column names are specific to the target (e.g., 'Lag_ED Beds_1')
             df_copy.loc[hospital_group.index, lag_col] = hospital_group[target_column].shift(i)
             if lag_col not in lag_features: # Add to list only once to avoid duplicates
                 lag_features.append(lag_col)
+
         # Add rolling mean features if enough data exists for the current hospital group
         if len(hospital_group) >= 6:
             roll_mean_3_col = f'Rolling_Mean_3_{target_column}'
-            df_copy.loc[hospital_group.index, roll_mean_3_col] = hospital_group[target_column].rolling(window=min(3, len(hospital_group)//2), min_periods=1).mean()
+            df_copy.loc[hospital_group.index, roll_mean_3_col] = \
+                hospital_group[target_column].rolling(window=min(3, len(hospital_group)//2), min_periods=1).mean()
             if roll_mean_3_col not in lag_features:
                 lag_features.append(roll_mean_3_col)
+
         if len(hospital_group) >= 14:
             roll_mean_7_col = f'Rolling_Mean_7_{target_column}'
-            df_copy.loc[hospital_group.index, roll_mean_7_col] = hospital_group[target_column].rolling(window=min(7, len(hospital_group)//2), min_periods=1).mean()
+            df_copy.loc[hospital_group.index, roll_mean_7_col] = \
+                hospital_group[target_column].rolling(window=min(7, len(hospital_group)//2), min_periods=1).mean()
             if roll_mean_7_col not in lag_features:
                 lag_features.append(roll_mean_7_col)
+
     # Fill NaN values created by shifting/rolling operations.
     # It's better to fill NaNs after all group-wise operations are complete,
     # or handle them during model training (e.g., CatBoost can handle NaNs).
@@ -254,11 +278,12 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
     """
     future_dates = []
     times = ['08:00', '14:00', '20:00'] # Standard observation times
-    
+
     # Pre-calculate holidays for the future period for proximity features
     calendar = IrishBankHolidays()
     future_max_date = pd.to_datetime(last_date) + timedelta(days=days + 60) # Extend range for next holiday calculation
     future_min_date = pd.to_datetime(last_date) - timedelta(days=60) # Extend range for last holiday calculation
+
     try:
         actual_holidays = calendar.holidays(start=future_min_date.normalize(), end=future_max_date.normalize()).normalize()
         actual_holidays = sorted(list(set(actual_holidays)))
@@ -270,6 +295,7 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
         future_date = last_date + timedelta(days=day)
         for time_str in times:
             future_datetime = pd.to_datetime(f"{future_date.date()} {time_str}")
+
             # Recalculate all relevant features for each future timestamp
             hour = future_datetime.hour
             day_of_week = future_datetime.dayofweek
@@ -280,6 +306,7 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
             is_weekend = int(day_of_week in [5, 6])
             is_monday = int(day_of_week == 0)
             is_friday = int(day_of_week == 4)
+
             # Cyclical encoding
             hour_sin = np.sin(2 * np.pi * hour / 24)
             hour_cos = np.cos(2 * np.pi * hour / 24)
@@ -287,6 +314,7 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
             day_cos = np.cos(2 * np.pi * day_of_week / 7)
             month_sin = np.sin(2 * np.pi * month / 12)
             month_cos = np.cos(2 * np.pi * month / 12)
+
             # Holiday check
             is_holiday = 0
             try:
@@ -294,29 +322,32 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
                 is_holiday = int(future_datetime.normalize() in actual_holidays)
             except Exception: # Catch any errors during holiday calculation
                 pass
+
             # Seasonal and peak hour indicators
             is_summer = int(month in [6, 7, 8])
             is_winter = int(month in [12, 1, 2])
             is_peak_hour = int(hour == 20)
             is_low_hour = int(hour == 8)
-            
-            # --- New Advanced Features for Future Dates ---
-            hour_dayofweek = int(str(hour) + "_" + str(day_of_week)) # Simplified encoding for future dates
-            hospital_code_hour = int(str(hospital_code) + "_" + str(hour)) # Simplified encoding for future dates
-            
+
+            # --- New Advanced Features for Future Dates
+            # Simplified encoding for future dates as we don't have the full category mapping
+            hour_dayofweek = int(str(hour) + "_" + str(day_of_week))
+            hospital_code_hour = int(str(hospital_code) + "_" + str(hour))
+
             capacity_hour_interaction = additional_capacity * hour # Numeric interaction
-            
+
             days_to_next_holiday = 365
             days_from_last_holiday = 365
+
             if actual_holidays:
-                days_to_next_holiday = min([ (h - future_datetime.normalize()).days for h in actual_holidays if h >= future_datetime.normalize() ], default=365)
-                days_from_last_holiday = min([ (future_datetime.normalize() - h).days for h in actual_holidays if h <= future_datetime.normalize() ], default=365)
+                days_to_next_holiday = min([(h - future_datetime.normalize()).days for h in actual_holidays if h >= future_datetime.normalize()], default=365)
+                days_from_last_holiday = min([(future_datetime.normalize() - h).days for h in actual_holidays if h <= future_datetime.normalize()], default=365)
 
             # Append all calculated features for the current future timestamp
             future_dates.append({
                 'Date': future_datetime.date(), # Date component
-                'Time': time_str,               # Time component (e.g., '08:00')
-                'Datetime': future_datetime,    # Full datetime object
+                'Time': time_str, # Time component (e.g., '08:00')
+                'Datetime': future_datetime, # Full datetime object
                 'Hospital': hospital,
                 'Hour': hour,
                 'DayOfWeek': day_of_week,
@@ -364,18 +395,20 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
             'Predicted_Low': [0] * len(future_df),
             'Predicted_High': [0] * len(future_df)
         }, index=future_df.index)
+
     predictions = []
     pred_lows = []
     pred_highs = []
+
     # Get the last few actual values from historical data for initial lag features
     last_values = historical_data[target_column].tail(7).values
     current_lags = list(reversed(last_values.tolist()))
     current_lags = current_lags + [0] * (7 - len(current_lags))
-    
+
     # Initialize rolling statistics with historical data's tail
     historical_mean_3 = historical_data[target_column].tail(3).mean() if len(historical_data) >= 3 else historical_data[target_column].mean()
     historical_mean_7 = historical_data[target_column].tail(7).mean() if len(historical_data) >= 7 else historical_data[target_column].mean()
-    
+
     # Calculate approximate prediction interval based on historical residuals
     # First, get predictions on historical data
     try:
@@ -383,6 +416,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
         # Ensure non-negative and rounded for residual calculation
         historical_preds = np.maximum(0, historical_preds).round(0)
         residuals = historical_data[target_column].values - historical_preds
+
         # Use 1.96 for approx 95% confidence interval, clamped at 0 for lower bound
         residual_std = np.std(residuals) if len(residuals) > 1 else 0
         interval_width = 1.96 * residual_std # Standard for 95% CI assuming normal distribution
@@ -393,9 +427,10 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     # Ensure all features for the model are in the future_df. If not, add them with default values.
     # This prevents KeyError if a new feature is added but create_future_dates doesn't yet generate it.
     for feature in features:
-        if feature not in future_df.columns and not (feature.startswith(f'Lag_{target_column}_') or \
-                                                      feature.startswith(f'Rolling_Mean_3_{target_column}') or \
-                                                      feature.startswith(f'Rolling_Mean_7_{target_column}')):
+        if feature not in future_df.columns and not (
+            feature.startswith(f'Lag_{target_column}_') or \
+            feature.startswith(f'Rolling_Mean_3_{target_column}') or \
+            feature.startswith(f'Rolling_Mean_7_{target_column}')):
             future_df[feature] = 0 # Add missing features with a default of 0
 
     for idx, row in future_df.iterrows():
@@ -403,7 +438,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
             feature_values = []
             for feature in features:
                 if feature.startswith(f'Lag_{target_column}_'):
-                    lag_num = int(feature.replace(f'Lag_{target_column}_', '')) - 1
+                    lag_num = int(feature.replace(f'Lag_{target_column}_', "")) - 1
                     if lag_num < len(current_lags):
                         feature_values.append(current_lags[lag_num])
                     else:
@@ -429,6 +464,7 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
                 pred = model.predict(feature_vector)[0]
                 pred = max(0, pred)
                 pred = round(pred)
+
                 # Calculate prediction intervals
                 pred_low = max(0, round(pred - interval_width))
                 pred_high = round(pred + interval_width)
@@ -439,7 +475,6 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
 
             # Update lags and rolling means for the next iteration with the new prediction
             current_lags = [pred] + current_lags[:6]
-            
             # Create a temporary list combining new predictions and historical data for rolling mean calculation
             temp_rolling_data_for_mean = list(reversed(predictions)) + list(reversed(historical_data[target_column].values))
             
@@ -480,6 +515,7 @@ def predict_prophet(historical_data, future_df_features, target_column):
     Returns point forecasts, lower, and upper bounds.
     """
     df_prophet = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
+    
     # Initialize Prophet with sensible defaults
     m = Prophet(
         daily_seasonality=True,
@@ -489,10 +525,12 @@ def predict_prophet(historical_data, future_df_features, target_column):
         interval_width=0.95 # Confidence interval width for yhat_lower/yhat_upper
     )
     # Add Irish holidays to Prophet model
-    m.add_country_holidays(country_name='IE') 
+    m.add_country_holidays(country_name='IE')
     m.fit(df_prophet)
+
     future = future_df_features[['Datetime']].rename(columns={'Datetime': 'ds'})
     forecast = m.predict(future)
+
     # Extract relevant columns and rename for consistency
     forecast_results = pd.DataFrame({
         'Predicted': np.maximum(0, forecast['yhat']).round(0),
@@ -502,8 +540,8 @@ def predict_prophet(historical_data, future_df_features, target_column):
     }, index=future_df_features.index)
     return forecast_results
 
-def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM',
-                   ml_iterations=500, ml_learning_rate=0.03, ml_residual_contribution=1.0):
+def predict_hybrid(historical_data, future_df_features, features, target_column,
+                   residual_model_name='LightGBM', ml_iterations=500, ml_learning_rate=0.03, ml_residual_contribution=1.0):
     """
     Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
@@ -546,7 +584,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     historical_data['prophet_yhat'] = historical_prophet_forecast['yhat'].values
     historical_data['prophet_yhat_lower'] = historical_prophet_forecast['yhat_lower'].values
     historical_data['prophet_yhat_upper'] = historical_prophet_forecast['yhat_upper'].values
-    
+
     # Calculate residuals for ML model training
     historical_data['residuals'] = historical_data[target_column] - historical_data['prophet_yhat']
 
@@ -556,12 +594,12 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     residual_data_for_lags, residual_lag_features = add_lag_features_smart(
         historical_data[['Hospital', 'Datetime', 'residuals']].copy(), 'residuals'
     )
-    
+
     # Merge lagged residuals back to the main historical_data using 'Hospital' and 'Datetime'
     historical_data = pd.merge(
-        historical_data, 
-        residual_data_for_lags.drop(columns=['residuals']), 
-        on=['Hospital', 'Datetime'], 
+        historical_data,
+        residual_data_for_lags.drop(columns=['residuals']),
+        on=['Hospital', 'Datetime'],
         how='left'
     )
     historical_data = historical_data.dropna(subset=['residuals']) # Drop rows where residuals or Prophet yhat were NaN
@@ -571,10 +609,9 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     if 'prophet_yhat' not in ml_residual_features:
         ml_residual_features.append('prophet_yhat') # Add Prophet's point forecast as a feature
     ml_residual_features.extend([f for f in residual_lag_features if f in historical_data.columns]) # Add residual lags
-    
+
     # Filter out features that are not actually present in historical_data
     ml_residual_features = [f for f in ml_residual_features if f in historical_data.columns]
-
 
     X_ml_res = historical_data.dropna(subset=ml_residual_features)[ml_residual_features]
     y_ml_res = historical_data.dropna(subset=ml_residual_features)['residuals']
@@ -604,13 +641,19 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             bagging_temperature=1, od_type='Iter', od_wait=50,
             loss_function='MAE' # Changed to MAE as requested
         )
+    elif residual_model_name == 'GradientBoostingRegressor': # Added for completeness
+        ml_residual_model = GradientBoostingRegressor(
+            n_estimators=ml_iterations, learning_rate=ml_learning_rate, max_depth=5,
+            subsample=0.7, random_state=42, loss='huber' # Huber is robust to outliers
+        )
     else:
         st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
         # Recursively call with default LightGBM, but keep original hybrid settings
-        return predict_hybrid(historical_data, future_df_features, features, target_column, 
-                              residual_model_name='LightGBM', ml_iterations=ml_iterations, 
-                              ml_learning_rate=ml_learning_rate, ml_residual_contribution=ml_residual_contribution)
-
+        return predict_hybrid(historical_data, future_df_features, features, target_column,
+                              residual_model_name='LightGBM', ml_iterations=ml_iterations,
+                              ml_learning_rate=ml_learning_rate,
+                              ml_residual_contribution=ml_residual_contribution)
+    
     ml_residual_model.fit(X_ml_res, y_ml_res)
 
     # --- Step 3: Forecast future with hybrid model ---
@@ -622,20 +665,19 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
 
     # Iteratively forecast residuals with ML model for future dates
     predicted_residuals = []
-    
     # Initialize residual lags/rolling means for future forecasting based on historical residuals
     last_residual_values_hist = historical_data['residuals'].tail(7).values
     current_residual_lags = list(reversed(last_residual_values_hist.tolist())) + [0] * (7 - len(last_residual_values_hist))
-    
-    historical_residual_mean_3 = historical_data['residuals'].tail(3).mean() if len(historical_data) >= 3 else historical_data['residuals'].mean()
-    historical_residual_mean_7 = historical_data['residuals'].tail(7).mean() if len(historical_data) >= 7 else historical_data['residuals'].mean()
+
+    historical_residual_mean_3 = historical_data['residuals'].tail(3).mean() if len(historical_data) >= 3 else (historical_data['residuals'].mean() if not historical_data['residuals'].empty else 0)
+    historical_residual_mean_7 = historical_data['residuals'].tail(7).mean() if len(historical_data) >= 7 else (historical_data['residuals'].mean() if not historical_data['residuals'].empty else 0)
 
     # Ensure all features for the residual model are present in future_df_features.
     # If not, add them with default values (e.g., 0) to avoid KeyError during prediction.
     for feature in ml_residual_features:
         if feature not in future_df_features.columns and not (feature.startswith('Lag_residuals_') or \
-                                                               feature.startswith('Rolling_Mean_3_residuals') or \
-                                                               feature.startswith('Rolling_Mean_7_residuals')):
+                                                              feature.startswith('Rolling_Mean_3_residuals') or \
+                                                              feature.startswith('Rolling_Mean_7_residuals')):
             future_df_features[feature] = 0 # Add missing features with a default of 0
 
     for idx, row in future_df_features.iterrows():
@@ -661,15 +703,16 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
                 st.warning(f"Feature vector length mismatch for residual prediction: Expected {len(ml_residual_features)}, got {len(residual_feature_values)}. Skipping.")
                 predicted_residuals.append(0)
                 continue
-            
+
             pred_res = ml_residual_model.predict(np.array(residual_feature_values).reshape(1, -1))[0]
             predicted_residuals.append(pred_res)
-            
+
             # Update residual lags for next iteration
             current_residual_lags = [pred_res] + current_residual_lags[:6]
-            
+
             # Update rolling residual means
             temp_res_rolling_data = list(reversed(predicted_residuals)) + list(reversed(historical_data['residuals'].values))
+            
             if len(temp_res_rolling_data) >= 3:
                 historical_residual_mean_3 = np.mean(temp_res_rolling_data[:3])
             elif len(temp_res_rolling_data) > 0:
@@ -709,6 +752,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
 def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, show_intervals=False):
     """Creates an interactive Plotly chart visualizing historical data and forecasts."""
     fig = go.Figure()
+
     # Add historical data trace
     fig.add_trace(go.Scatter(
         x=historical_data['Datetime'],
@@ -718,6 +762,7 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
         line=dict(color='blue'),
         marker=dict(size=4)
     ))
+
     # Add forecast data trace (point forecast)
     fig.add_trace(go.Scatter(
         x=forecast_data['Datetime'],
@@ -727,11 +772,13 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
         line=dict(color='red', dash='dash'), # Dashed line for forecast
         marker=dict(size=6, symbol='diamond')
     ))
+
     # Add forecast intervals if requested and available
     # Check if 'Predicted_Low' and 'Predicted_High' exist and are not all zeros
     if show_intervals and 'Predicted_Low' in forecast_data.columns and 'Predicted_High' in forecast_data.columns:
         # Check if there's actual variation in intervals to plot them
-        if not (forecast_data['Predicted_Low'].eq(forecast_data['Predicted']).all() and forecast_data['Predicted_High'].eq(forecast_data['Predicted']).all()):
+        if not (forecast_data['Predicted_Low'].eq(forecast_data['Predicted']).all() and
+                forecast_data['Predicted_High'].eq(forecast_data['Predicted']).all()):
             fig.add_trace(go.Scatter(
                 x=pd.concat([forecast_data['Datetime'], forecast_data['Datetime'].iloc[::-1]]), # go forward then backward
                 y=pd.concat([forecast_data['Predicted_High'], forecast_data['Predicted_Low'].iloc[::-1]]), # upper, then lower reversed
@@ -741,6 +788,7 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
                 name='Forecast Interval',
                 hoverinfo='skip' # Don't show hover for fill
             ))
+
     # Add a vertical line to visually separate historical data from the forecast
     last_historical_date = historical_data['Datetime'].max()
     fig.add_shape(
@@ -752,6 +800,7 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
         yref="paper", # Relative to plot height
         line=dict(color="gray", width=2, dash="dot"),
     )
+
     # Add annotation for the forecast start point
     fig.add_annotation(
         x=last_historical_date,
@@ -763,6 +812,7 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
         bordercolor="gray",
         borderwidth=1
     )
+
     # Update plot layout with titles and labels
     fig.update_layout(
         title=f'{metric_name} Forecast - {hospital_name}',
@@ -776,7 +826,7 @@ def plot_forecasts(historical_data, forecast_data, metric_name, hospital_name, s
 
 def add_forecasting_insights():
     """Displays insights and tips about the forecasting process."""
-    with st.expander(" 💡  Forecasting Insights & Tips", expanded=False):
+    with st.expander(" 💡 Forecasting Insights & Tips", expanded=False):
         st.subheader("Data Requirements")
         st.markdown("""
         For accurate forecasting, you need:
@@ -787,19 +837,30 @@ def add_forecasting_insights():
         """)
         st.subheader("Understanding Your Results")
         st.markdown("""
-        * **MAE (Mean Absolute Error)**: Lower values indicate better model accuracy. This metric represents the average absolute difference between the predicted values and the actual values. It is less sensitive to outliers compared to RMSE.
-        * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
-        * **Validation**: The model's performance (MAE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
-        * **Prediction Intervals (Forecast Low/High)**: For Prophet and Hybrid models, these directly come from the model's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
+        * **MAE (Mean Absolute Error)**: Lower values indicate better model accuracy. This
+            metric represents the average absolute difference between the predicted values and the
+            actual values. It is less sensitive to outliers compared to RMSE.
+        * **Historical vs. Forecast**: The generated chart clearly visualizes your past data
+            patterns and the predicted future values, allowing for easy comparison.
+        * **Validation**: The model's performance (MAE) is calculated on a subset of your
+            historical data, showing how well it generalizes to unseen but similar data.
+        * **Prediction Intervals (Forecast Low/High)**: For Prophet and Hybrid models, these
+            directly come from the model's uncertainty estimates. For other models, they are
+            **approximate intervals** derived from the historical prediction residuals, providing a general
+            sense of forecast variability.
         """)
 
 @st.cache_resource # Cache the trained model for faster subsequent runs
-def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, enable_tuning: bool, tuning_iterations: int):
+def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
+                   enable_tuning: bool, tuning_iterations: int):
     """
     Initializes and returns the selected machine learning model,
     with optional hyperparameter tuning.
     """
     param_grid = {} # Define hyperparameter search space
+    model_class = None
+    base_params = {}
+
     if model_name == "CatBoost":
         model_class = cb.CatBoostRegressor
         base_params = {
@@ -874,10 +935,9 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         return get_ml_model("CatBoost", X_train, y_train, enable_tuning, tuning_iterations)
 
     if enable_tuning and len(param_grid) > 0 and len(X_train) >= 20: # Only tune if enough data and params defined
-        st.info(f" 🚀  Starting Hyperparameter Tuning for {model_name} with {tuning_iterations} iterations...")
+        st.info(f" 🚀 Starting Hyperparameter Tuning for {model_name} with {tuning_iterations} iterations...")
         # Use TimeSeriesSplit for cross-validation during tuning
         tscv_tuning = TimeSeriesSplit(n_splits=min(5, max(2, len(X_train) // 10))) # At least 2 splits for tuning
-        
         # Use n_iter for how many parameter settings are sampled.
         random_search = RandomizedSearchCV(
             estimator=model_class(**base_params),
@@ -890,12 +950,12 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
             n_jobs=-1 # Use all available cores for tuning
         )
         random_search.fit(X_train, y_train)
-        st.success(f" ✅  Tuning complete. Best parameters for {model_name}: {random_search.best_params_}")
+        st.success(f" ✅ Tuning complete. Best parameters for {model_name}: {random_search.best_params_}")
         st.info(f"Best CV MAE during tuning: {-random_search.best_score_:.2f}")
         return random_search.best_estimator_
     else:
         if enable_tuning and len(X_train) < 20:
-             st.warning(f"Insufficient data ({len(X_train)} records) for hyperparameter tuning. Training {model_name} with default parameters.")
+            st.warning(f"Insufficient data ({len(X_train)} records) for hyperparameter tuning. Training {model_name} with default parameters.")
         # Return model with default parameters if tuning is not enabled or not enough data
         return model_class(**base_params).fit(X_train, y_train) # Fit default model if no tuning
 
@@ -910,16 +970,18 @@ forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7)
 st.sidebar.header("Model Settings")
 model_option = st.sidebar.selectbox(
     "Select ML Model:",
-    options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)", "Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]
+    options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)", "Prophet",
+             "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid", "Prophet-GradientBoosting Hybrid"]
 )
 
 # Hyperparameter Tuning options for tree-based models (non-hybrid)
 st.sidebar.subheader("Hyperparameter Tuning (Tree-based models)")
 enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
-    help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
+                                    help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
-    help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
-if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] and enable_tuning:
+                                      help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
+
+if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid", "Prophet-GradientBoosting Hybrid"] and enable_tuning:
     st.sidebar.warning("Hyperparameter tuning is not available for Prophet or Hybrid models via this interface.")
     enable_tuning = False # Disable tuning for non-tree models
 
@@ -927,6 +989,7 @@ if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybr
 hybrid_ml_iterations = 500
 hybrid_ml_learning_rate = 0.05
 hybrid_ml_residual_contribution = 1.0
+
 if "Hybrid" in model_option:
     st.sidebar.subheader("Hybrid Model Parameters (ML Residual Component)")
     hybrid_ml_iterations = st.sidebar.slider(
@@ -952,13 +1015,14 @@ if uploaded_file:
         df_processed = prepare_data(df) # Renamed to df_processed as it's no longer just 'long'
 
         # Show data loading success message and summary
-        st.success(f" ✅  Data loaded and processed successfully! {len(df_processed)} records found.")
+        st.success(f" ✅ Data loaded and processed successfully! {len(df_processed)} records found.")
 
         # Display a sample of the processed data to confirm the new structure
-        st.subheader(" 📋  Sample of Processed Data")
+        st.subheader(" 📋 Sample of Processed Data")
         st.dataframe(df_processed[['Date', 'Time', 'ED Beds', 'Trolleys', 'Capacity',
-                                    'Hour_DayOfWeek', 'Hospital_Code_Hour', 'Capacity_Hour_Interaction',
-                                    'DaysToNextHoliday', 'DaysFromLastHoliday']].head())
+                                   'Hour_DayOfWeek', 'Hospital_Code_Hour',
+                                   'Capacity_Hour_Interaction',
+                                   'DaysToNextHoliday', 'DaysFromLastHoliday']].head())
 
         # Get unique hospitals for selection in the sidebar
         hospitals = sorted(df_processed['Hospital'].unique())
@@ -969,7 +1033,7 @@ if uploaded_file:
             trolley_records=('Trolleys', 'count'),
             capacity_records=('Capacity', 'count') # Added capacity records to summary
         ).reset_index()
-        st.subheader(" 📊  Data Summary by Hospital")
+        st.subheader(" 📊 Data Summary by Hospital")
         st.dataframe(data_summary, use_container_width=True)
 
         # Hospital selection dropdown
@@ -980,10 +1044,10 @@ if uploaded_file:
         )
 
         # Run forecast button
-        run_forecast = st.sidebar.button(" 🚀  Run Forecast", type="primary")
+        run_forecast = st.sidebar.button(" 🚀 Run Forecast", type="primary")
 
         if run_forecast:
-            st.header(" 📊  Forecast Results")
+            st.header(" 📊 Forecast Results")
             # Use a spinner to indicate ongoing computation
             with st.spinner("Generating forecasts... This may take a few moments depending on data size, model complexity, and tuning settings."):
                 # Determine which hospitals to process based on user selection
@@ -1007,7 +1071,7 @@ if uploaded_file:
 
                 # Iterate through each selected hospital and metric ('ED Beds', 'Trolleys', 'Capacity')
                 for hospital in selected_hospitals:
-                    st.subheader(f" 🏥  {hospital}")
+                    st.subheader(f" 🏥 {hospital}")
                     # Filter data for the current hospital
                     hospital_data = df_processed[df_processed['Hospital'] == hospital].copy()
 
@@ -1015,7 +1079,7 @@ if uploaded_file:
                     hospital_code = hospital_data['Hospital_Code'].iloc[0] if not hospital_data.empty else 0
                     # Use the last known capacity value for forecasting future capacity or as a feature for other forecasts
                     current_hospital_capacity_val = hospital_data['Capacity'].fillna(0).iloc[-1] if not hospital_data.empty else 0
-                    
+
                     # Get the last date from the historical data for creating future dates
                     last_date = hospital_data['Datetime'].max().date() if not hospital_data.empty else datetime.now().date()
 
@@ -1023,11 +1087,11 @@ if uploaded_file:
                     for target_col_name in ['ED Beds', 'Trolleys', 'Capacity']: # Added 'Capacity' as a target
                         # Check if we have sufficient data for the current target column
                         if hospital_data[target_col_name].count() < 10:
-                            st.warning(f" ⚠️  Insufficient data for '{target_col_name}' at {hospital} ({hospital_data[target_col_name].count()} records). Need at least 10 records for meaningful forecasting.")
+                            st.warning(f" ⚠️ Insufficient data for '{target_col_name}' at {hospital} ({hospital_data[target_col_name].count()} records). Need at least 10 records for meaningful forecasting.")
                             continue
 
                         st.info(f"Processing '{target_col_name}' for {hospital} using {model_option}")
-                        
+
                         # Create future dates DataFrame (common for all models)
                         future_df_base = create_future_dates(
                             pd.to_datetime(last_date),
@@ -1043,6 +1107,7 @@ if uploaded_file:
                             # Prophet handles its own feature engineering and iterative prediction
                             if target_col_name == 'Capacity':
                                 st.warning("Prophet model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
+                            
                             forecast_results = predict_prophet(hospital_data, future_df_base, target_col_name)
 
                             # Calculate MAE for Prophet on historical data for display
@@ -1054,25 +1119,30 @@ if uploaded_file:
                             historical_prophet_preds = np.maximum(0, historical_prophet_preds).round(0)
                             avg_mae = mean_absolute_error(hospital_data[target_col_name].values, historical_prophet_preds)
                             st.info(f"Prophet's training MAE for {target_col_name}: {avg_mae:.2f} (on historical data)")
-                            
-                        elif model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]:
+
+                        elif "Hybrid" in model_option:
                             # Hybrid model
                             if target_col_name == 'Capacity':
                                 st.warning("Hybrid model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
                             
-                            residual_model = 'LightGBM' if model_option == "Prophet-LightGBM Hybrid" else 'CatBoost'
+                            residual_model = model_option.split('-')[1] # e.g., 'LightGBM', 'CatBoost', 'GradientBoosting'
+                            residual_model_map = {
+                                'LightGBM': 'LightGBM',
+                                'CatBoost': 'CatBoost',
+                                'GradientBoosting': 'GradientBoostingRegressor' # Map to the internal model name
+                            }
+                            residual_model_name_internal = residual_model_map.get(residual_model, 'LightGBM') # Default to LightGBM
                             
                             forecast_results = predict_hybrid(
-                                hospital_data, 
-                                future_df_base, 
+                                hospital_data,
+                                future_df_base,
                                 base_features, # Pass base_features including advanced ones
-                                target_col_name, 
-                                residual_model_name=residual_model,
+                                target_col_name,
+                                residual_model_name=residual_model_name_internal,
                                 ml_iterations=hybrid_ml_iterations, # Pass new params
                                 ml_learning_rate=hybrid_ml_learning_rate, # Pass new params
                                 ml_residual_contribution=hybrid_ml_residual_contribution # Pass new params
                             )
-                            
                             # Calculate MAE for Hybrid on historical data (Prophet component's MAE)
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
                             m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
@@ -1082,10 +1152,11 @@ if uploaded_file:
                             historical_prophet_preds = np.maximum(0, historical_prophet_preds).round(0)
                             avg_mae = mean_absolute_error(hospital_data[target_col_name].values, historical_prophet_preds)
                             st.info(f"Hybrid model's base Prophet training MAE for {target_col_name}: {avg_mae:.2f} (on historical data)")
+                        
                         else: # Tree-based models (CatBoost, LightGBM, XGBoost, GradientBoosting)
                             # Add lag and rolling features specifically for the current target column
                             data_with_lags, lag_features = add_lag_features_smart(hospital_data.copy(), target_col_name)
-                            
+
                             # Determine features for this specific model
                             model_features = base_features[:] # Start with all base features including advanced ones
                             if target_col_name != 'Capacity' and 'Capacity' in data_with_lags.columns:
@@ -1093,19 +1164,19 @@ if uploaded_file:
                             
                             all_features_for_model = model_features + lag_features
                             available_features = [f for f in all_features_for_model if f in data_with_lags.columns and f != target_col_name]
-                            
+
                             training_data = data_with_lags.dropna(subset=[target_col_name] + available_features)
-                            
+
                             if len(training_data) < 5:
-                                st.warning(f" ⚠️  After preprocessing, insufficient data for '{target_col_name}' at {hospital} ({len(training_data)} records). Need at least 5 records to train a model.")
+                                st.warning(f" ⚠️ After preprocessing, insufficient data for '{target_col_name}' at {hospital} ({len(training_data)} records). Need at least 5 records to train a model.")
                                 continue
-                            
+
                             X = training_data[available_features]
                             y = training_data[target_col_name]
 
                             # Initialize and/or tune the selected model
                             model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
-                            
+
                             # --- Time Series Cross-Validation for tree-based models ---
                             # If tuning was enabled, get_ml_model would have already reported the best CV MAE.
                             # Otherwise, calculate MAE for the default model.
@@ -1115,6 +1186,7 @@ if uploaded_file:
                                 for fold_idx, (train_index, test_index) in enumerate(tscv.split(X)):
                                     X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
                                     y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
+                                    
                                     if len(X_train_fold) > 0 and len(X_test_fold) > 0:
                                         fold_model = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0) # No tuning in CV folds
                                         y_pred_fold = fold_model.predict(X_test_fold)
@@ -1122,17 +1194,19 @@ if uploaded_file:
                                         fold_maes.append(mean_absolute_error(y_test_fold, y_pred_fold))
                                     else:
                                         st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
+                                
                                 if fold_maes:
                                     avg_mae = np.mean(fold_maes)
                                     st.info(f"Cross-Validation MAE for {target_col_name}: {avg_mae:.2f} (Avg. over {len(fold_maes)} folds)")
                                 else:
                                     st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
+                            
                             elif not enable_tuning and len(X) > 0: # Fallback to training MAE if not enough data for CV
                                 y_pred_train = model.predict(X)
                                 y_pred_train = np.maximum(0, y_pred_train).round(0)
                                 avg_mae = mean_absolute_error(y, y_pred_train)
                                 st.info(f"Training MAE for {target_col_name}: {avg_mae:.2f} (Trained on all available data)")
-                            
+
                             # Generate predictions for future dates using the trained model
                             # Ensure future_df_base has all required features
                             forecast_results = forecast_with_lags(model, training_data, future_df_base, available_features, target_col_name)
@@ -1144,7 +1218,7 @@ if uploaded_file:
                             st.metric(f"{target_col_name} MAE", f"{avg_mae:.2f}" if avg_mae is not np.nan else "N/A")
                         with col2:
                             # For Prophet/Hybrid, training records reflect all data passed to Prophet
-                            train_records_display = f"{len(X)}" if model_option not in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] else f"{len(hospital_data)}"
+                            train_records_display = f"{len(X)}" if model_option not in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid", "Prophet-GradientBoosting Hybrid"] else f"{len(hospital_data)}"
                             st.metric(f"Training Records", train_records_display)
                         with col3:
                             last_val_display = f"{hospital_data[target_col_name].iloc[-1]:.0f}" if not hospital_data.empty else "N/A"
@@ -1152,10 +1226,10 @@ if uploaded_file:
 
                         # Ensure 'Datetime' column is present before plotting
                         assert 'Datetime' in forecast_results.columns, "INTERNAL ERROR: 'Datetime' column missing in forecast_results before plotting."
-
+                        
                         # Create and display the forecast plot
                         # Pass show_intervals=True for all models now that intervals are generated for tree-based too
-                        show_intervals = True 
+                        show_intervals = True
                         fig = plot_forecasts(
                             hospital_data.tail(21), # Show last 21 historical points (approx. 1 week at 3 readings/day)
                             forecast_results, # Use the common forecast_results DataFrame
@@ -1166,7 +1240,7 @@ if uploaded_file:
                         st.plotly_chart(fig, use_container_width=True)
 
                         # Allow users to view detailed forecast data in an expandable section
-                        with st.expander(f" 📋  {target_col_name} Forecast Details"):
+                        with st.expander(f" 📋 {target_col_name} Forecast Details"):
                             display_cols = ['Date', 'Time', 'Predicted']
                             if show_intervals:
                                 display_cols.extend(['Predicted_Low', 'Predicted_High'])
@@ -1176,53 +1250,58 @@ if uploaded_file:
                             if show_intervals:
                                 forecast_display['Predicted_Low'] = forecast_results['Predicted_Low']
                                 forecast_display['Predicted_High'] = forecast_results['Predicted_High']
+
                             # Ensure all displayed numbers are integers
                             for col in ['Predicted', 'Predicted_Low', 'Predicted_High']:
                                 if col in forecast_display.columns:
                                     forecast_display[col] = forecast_display[col].astype(int)
+
                             st.dataframe(forecast_display[display_cols], use_container_width=True)
-                        
-                        # Provide a download button for the forecast data
-                        csv_data_cols = ['Datetime', 'Hospital', 'Predicted']
-                        if show_intervals:
-                            csv_data_cols.extend(['Predicted_Low', 'Predicted_High'])
-                        
-                        csv_data_to_download = future_df_base.copy()
-                        csv_data_to_download['Predicted'] = forecast_results['Predicted']
-                        if show_intervals:
-                            csv_data_to_download['Predicted_Low'] = forecast_results['Predicted_Low']
-                            csv_data_to_download['Predicted_High'] = forecast_results['Predicted_High']
-                        csv_data_to_download['Metric'] = target_col_name
-                        # Ensure all numbers are integers for CSV
-                        for col in ['Predicted', 'Predicted_Low', 'Predicted_High']:
-                            if col in csv_data_to_download.columns:
-                                csv_data_to_download[col] = csv_data_to_download[col].astype(int)
-                        st.download_button(
-                            f" 📥  Download {target_col_name} Forecast CSV",
-                            csv_data_to_download[csv_data_cols + ['Metric']].to_csv(index=False),
-                            file_name=f"{hospital}_{target_col_name.replace(' ', '_')}_forecast.csv",
-                            mime="text/csv",
-                            key=f"{hospital}_{target_col_name}_download"
-                        )
+
+                            # Provide a download button for the forecast data
+                            csv_data_cols = ['Datetime', 'Hospital', 'Predicted']
+                            if show_intervals:
+                                csv_data_cols.extend(['Predicted_Low', 'Predicted_High'])
+                            
+                            csv_data_to_download = future_df_base.copy()
+                            csv_data_to_download['Predicted'] = forecast_results['Predicted']
+                            if show_intervals:
+                                csv_data_to_download['Predicted_Low'] = forecast_results['Predicted_Low']
+                                csv_data_to_download['Predicted_High'] = forecast_results['Predicted_High']
+                            csv_data_to_download['Metric'] = target_col_name
+
+                            # Ensure all numbers are integers for CSV
+                            for col in ['Predicted', 'Predicted_Low', 'Predicted_High']:
+                                if col in csv_data_to_download.columns:
+                                    csv_data_to_download[col] = csv_data_to_download[col].astype(int)
+
+                            st.download_button(
+                                f" 📥 Download {target_col_name} Forecast CSV",
+                                csv_data_to_download[csv_data_cols + ['Metric']].to_csv(index=False),
+                                file_name=f"{hospital}_{target_col_name.replace(' ', '_')}_forecast.csv",
+                                mime="text/csv",
+                                key=f"{hospital}_{target_col_name}_download"
+                            )
                         st.divider()
                 add_forecasting_insights()
     except Exception as e:
-        st.error(f" ❌  Error processing file: {str(e)}")
+        st.error(f" ❌ Error processing file: {str(e)}")
         st.info("Please check that your Excel file contains the required columns and data format as described below.")
 else:
-    st.info(" 👆  Please upload an Excel file to begin forecasting.")
-    with st.expander(" 📋  Expected File Format"):
+    st.info(" 👆 Please upload an Excel file to begin forecasting.")
+    with st.expander(" 📋 Expected File Format"):
         st.markdown("""
         **Required columns:**
-        - `Hospital Group Name`: The group the hospital belongs to.
-        - `Hospital`: Unique identifier for the hospital.
-        - `Date`: The date of the observation (e.g., '30/05/2025').
-        - `Tracker8am`, `Tracker2pm`, `Tracker8pm`: ED bed counts at 8 AM, 2 PM, 8 PM respectively.
-        - `TimeTotal_8am`, `TimeTotal_2pm`, `TimeTotal_8pm`: Trolley counts at 8 AM, 2 PM, 8 PM respectively.
-        - `AdditionalCapacityOpen Morning`: Any additional capacity opened in the morning for that day.
+        -   `Hospital Group Name`: The group the hospital belongs to.
+        -   `Hospital`: Unique identifier for the hospital.
+        -   `Date`: The date of the observation (e.g., '30/05/2025').
+        -   `Tracker8am`, `Tracker2pm`, `Tracker8pm`: ED bed counts at 8 AM, 2 PM, 8 PM respectively.
+        -   `TimeTotal_8am`, `TimeTotal_2pm`, `TimeTotal_8pm`: Trolley counts at 8 AM, 2 PM, 8 PM respectively.
+        -   `AdditionalCapacityOpen Morning`: Any additional capacity opened in the morning for that day.
         **Data should contain:**
-        - Historical ED and trolley count data.
-        - Data for multiple hospitals (optional, but the app supports it).
-        - At least **10-15 records** per hospital-metric combination for basic forecasting.
-        - At least **30+ records** per hospital-metric combination for more reliable forecasting.
+        -   Historical ED and trolley count data.
+        -   Data for multiple hospitals (optional, but the app supports it).
+        -   At least **10-15 records** per hospital-metric combination for basic forecasting.
+        -   At least **30+ records** per hospital-metric combination for more reliable forecasting.
         """)
+
