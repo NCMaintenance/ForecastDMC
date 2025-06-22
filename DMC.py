@@ -212,7 +212,6 @@ def add_lag_features_smart(df, target_column):
     return df_copy, lag_features
 
 
-@st.cache_data
 def create_future_dates(last_date, hospital, hospital_code, additional_capacity, days=7):
     """
     Creates a DataFrame of future dates and times with corresponding feature values
@@ -294,7 +293,6 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
 
     return pd.DataFrame(future_dates)
 
-@st.cache_data
 def forecast_with_lags(model, historical_data, future_df, features, target_column):
     """
     Generates forecasts iteratively, updating lag and rolling features
@@ -400,24 +398,19 @@ def forecast_with_lags(model, historical_data, future_df, features, target_colum
     }, index=future_df.index)
 
 
-@st.cache_data
-def predict_prophet(historical_data, future_df_features, target_column,
-                    seasonality_mode, changepoint_prior_scale, seasonality_prior_scale,
-                    daily_seasonality, weekly_seasonality, yearly_seasonality):
+def predict_prophet(historical_data, future_df_features, target_column):
     """
     Forecasts using Facebook Prophet.
     Returns point forecasts, lower, and upper bounds.
     """
     df_prophet = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
 
-    # Initialize Prophet with configurable parameters
+    # Initialize Prophet with sensible defaults
     m = Prophet(
-        daily_seasonality=daily_seasonality,
-        weekly_seasonality=weekly_seasonality,
-        yearly_seasonality=yearly_seasonality,
-        seasonality_mode=seasonality_mode,
-        changepoint_prior_scale=changepoint_prior_scale,
-        seasonality_prior_scale=seasonality_prior_scale,
+        daily_seasonality=True,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+        seasonality_mode='additive',
         interval_width=0.95 # Confidence interval width for yhat_lower/yhat_upper
     )
 
@@ -442,19 +435,10 @@ def predict_prophet(historical_data, future_df_features, target_column,
 
     return forecast_results
 
-@st.cache_data
-def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM',
-                   ml_iterations=500, ml_learning_rate=0.03, ml_residual_contribution=1.0,
-                   prophet_seasonality_mode='additive', prophet_changepoint_prior_scale=0.05,
-                   prophet_seasonality_prior_scale=10.0, prophet_daily_seasonality=True,
-                   prophet_weekly_seasonality=True, prophet_yearly_seasonality=True,
-                   enable_tuning: bool = False, tuning_iterations: int = 10):
+def predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM'):
     """
     Hybrid forecasting: Prophet for trend/seasonality, and a specified ML model for residuals.
     Returns point forecasts, lower, and upper bounds (from Prophet).
-    ml_iterations: Number of trees/iterations for the ML residual model.
-    ml_learning_rate: Learning rate for the ML residual model.
-    ml_residual_contribution: Weight (0.0 to 1.0) of the ML residual prediction. 1.0 means full residual.
     """
     if historical_data.empty:
         st.error("Historical data for hybrid forecasting is empty. Cannot generate forecasts.")
@@ -467,12 +451,10 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
     # --- Step 1: Prophet base forecast ---
     df_prophet_train = historical_data[['Datetime', target_column]].rename(columns={'Datetime': 'ds', target_column: 'y'})
     m_prophet = Prophet(
-        daily_seasonality=prophet_daily_seasonality,
-        weekly_seasonality=prophet_weekly_seasonality,
-        yearly_seasonality=prophet_yearly_seasonality,
-        seasonality_mode=prophet_seasonality_mode,
-        changepoint_prior_scale=prophet_changepoint_prior_scale,
-        seasonality_prior_scale=prophet_seasonality_prior_scale,
+        daily_seasonality=True,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+        seasonality_mode='additive',
         interval_width=0.95
     )
     m_prophet.add_country_holidays(country_name='IE') # Add Irish holidays
@@ -517,42 +499,27 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
         }, index=future_df_features.index)
 
     # Initialize and train ML model for residuals
-    if enable_tuning:
-        st.info(f"Tune an ML model ({residual_model_name}) for residuals of {target_column}...")
-        # Note: effective_tuning_iterations is passed as tuning_iterations to this function
-        ml_residual_model = get_ml_model(residual_model_name, X_ml_res, y_ml_res, True, tuning_iterations)
+    # Using a slightly different learning rate for residual models
+    if residual_model_name == 'LightGBM':
+        ml_residual_model = lgb.LGBMRegressor(
+            n_estimators=min(500, len(X_ml_res) * 2), learning_rate=0.03, num_leaves=20,
+            max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
+            random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
+        )
+    elif residual_model_name == 'CatBoost':
+        ml_residual_model = cb.CatBoostRegressor(
+            iterations=min(500, len(X_ml_res) * 2), learning_rate=0.03, depth=5,
+            subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
+            verbose=False, random_state=42, allow_writing_files=False,
+            bagging_temperature=1, od_type='Iter', od_wait=20,
+            loss_function='MAE' # Changed to MAE as requested
+        )
     else:
-        st.info(f"Training ML model ({residual_model_name}) for residuals of {target_column} with pre-defined parameters...")
-        if residual_model_name == 'LightGBM':
-            ml_residual_model = lgb.LGBMRegressor(
-                n_estimators=ml_iterations, learning_rate=ml_learning_rate, num_leaves=20,
-                max_depth=-1, min_child_samples=10, subsample=0.7, colsample_bytree=0.7,
-                random_state=42, n_jobs=-1, objective='regression_l1' # MAE objective
-            )
-        elif residual_model_name == 'CatBoost':
-            # Base parameters for CatBoost residual model when not tuning
-            # These should ideally align with some defaults or be simpler than full tuning
-            ml_residual_model = cb.CatBoostRegressor(
-                iterations=ml_iterations, learning_rate=ml_learning_rate, depth=6, # Using depth 6 as a common default
-                l2_leaf_reg=3, # Using l2_leaf_reg 3 as a common default
-                verbose=False, random_state=42, allow_writing_files=False,
-                loss_function='MAE', # Standardized to MAE
-                # bootstrap_type='Bernoulli', # If subsample < 1, but not set here by default
-                # subsample=0.8, # Example, if we want to set it
-                # od_type='Iter', od_wait=50 # Optional: for early stopping
-            )
-        else:
-            st.error(f"Unsupported residual model: {residual_model_name}. Cannot train for hybrid model.")
-            # Fallback to Prophet only if residual model is unsupported and cannot be trained
-            future_prophet_forecast = m_prophet.predict(future_df_features[['Datetime']].rename(columns={'Datetime': 'ds'}))
-            return pd.DataFrame({
-                'Predicted': np.maximum(0, future_prophet_forecast['yhat']).round(0),
-                'Predicted_Low': np.maximum(0, future_prophet_forecast['yhat_lower']).round(0),
-                'Predicted_High': np.maximum(0, future_prophet_forecast['yhat_upper']).round(0),
-                'Datetime': future_df_features['Datetime']
-            }, index=future_df_features.index)
+        st.error(f"Unsupported residual model: {residual_model_name}. Defaulting to LightGBM for residuals.")
+        return predict_hybrid(historical_data, future_df_features, features, target_column, residual_model_name='LightGBM') # Fallback
 
-        ml_residual_model.fit(X_ml_res, y_ml_res)
+
+    ml_residual_model.fit(X_ml_res, y_ml_res)
 
     # --- Step 3: Forecast future with hybrid model ---
     # Get Prophet's future forecast
@@ -614,8 +581,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             predicted_residuals.append(0)
 
     # Final hybrid prediction = Prophet base + ML residual prediction
-    # Apply the ml_residual_contribution
-    hybrid_predictions = future_prophet_forecast['yhat'].values + (ml_residual_contribution * np.array(predicted_residuals))
+    hybrid_predictions = future_prophet_forecast['yhat'].values + np.array(predicted_residuals)
     hybrid_predictions = np.maximum(0, hybrid_predictions).round(0)
 
     return pd.DataFrame({
@@ -716,9 +682,9 @@ def add_forecasting_insights():
 
         st.subheader("Understanding Your Results")
         st.markdown("""
-        * **MAE (Mean Absolute Error)**: Lower values indicate better model accuracy. This metric represents the average absolute difference between the predicted values and the actual values. It is less sensitive to outliers compared to RMSE.
+        * **RMSE (Root Mean Square Error)**: Lower values indicate better model accuracy. This metric represents the average magnitude of the errors in your predictions.
         * **Historical vs. Forecast**: The generated chart clearly visualizes your past data patterns and the predicted future values, allowing for easy comparison.
-        * **Validation**: The model's performance (MAE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
+        * **Validation**: The model's performance (RMSE) is calculated on a subset of your historical data, showing how well it generalizes to unseen but similar data.
         * **Prediction Intervals (Forecast Low/High)**: For Prophet and Hybrid models, these directly come from the model's uncertainty estimates. For other models, they are **approximate intervals** derived from the historical prediction residuals, providing a general sense of forecast variability.
         """)
 
@@ -734,17 +700,14 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         model_class = cb.CatBoostRegressor
         base_params = {
             'verbose': False, 'random_state': 42, 'allow_writing_files': False,
-            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'MAE',
-            'bootstrap_type': 'Bernoulli' # Added for subsample to be effective
+            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'RMSE'
         }
         if enable_tuning:
             param_grid = {
-                'iterations': [200, 500, 800, 1200],  # Increased range
-                'learning_rate': [0.01, 0.03, 0.05, 0.08, 0.1], # Expanded range
-                'depth': [4, 6, 8, 10], # Added 10
-                'l2_leaf_reg': [1, 3, 5, 7], # Expanded range
-                'subsample': [0.7, 0.85, 1.0], # Added subsample
-                'colsample_bylevel': [0.7, 0.85, 1.0] # Added colsample_bylevel
+                'iterations': [100, 250, 500], # Reduced for faster tuning
+                'learning_rate': [0.03, 0.05, 0.08],
+                'depth': [4, 6, 8],
+                'l2_leaf_reg': [1, 3, 5]
             }
         else:
             base_params['iterations'] = min(1000, len(X_train) * 3) # Default iterations
@@ -820,7 +783,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
             estimator=model_class(**base_params),
             param_distributions=param_grid,
             n_iter=tuning_iterations,
-            scoring='neg_mean_absolute_error', # Optimize for MAE
+            scoring='neg_root_mean_squared_error', # Optimize for RMSE
             cv=tscv_tuning,
             verbose=0, # Suppress verbose output from GridSearchCV
             random_state=42,
@@ -828,7 +791,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series, ena
         )
         random_search.fit(X_train, y_train)
         st.success(f"✅ Tuning complete. Best parameters for {model_name}: {random_search.best_params_}")
-        st.info(f"Best CV MAE during tuning: {-random_search.best_score_:.2f}")
+        st.info(f"Best CV RMSE during tuning: {-random_search.best_score_:.2f}")
         return random_search.best_estimator_
     else:
         if enable_tuning and len(X_train) < 20:
@@ -850,70 +813,16 @@ model_option = st.sidebar.selectbox(
     options=["CatBoost", "LightGBM", "XGBoost", "GradientBoosting (Scikit-learn)", "Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]
 )
 
-# Hyperparameter Tuning options for tree-based models (non-hybrid)
+# Hyperparameter Tuning options
 st.sidebar.subheader("Hyperparameter Tuning (Tree-based models)")
 enable_tuning = st.sidebar.checkbox("Enable Tuning", value=False,
     help="Applies RandomizedSearchCV for optimal hyperparameters. Can increase processing time significantly.")
 tuning_iterations = st.sidebar.slider("Tuning Iterations (if enabled)", 5, 50, 10,
     help="Number of parameter settings that are sampled. More iterations can lead to better models but take longer.")
 
-# Corrected logic for handling enable_tuning with Prophet and Hybrid models
-if model_option == "Prophet":
-    if enable_tuning:
-        st.sidebar.warning("For the Prophet model, hyperparameter adjustments are made using the 'Prophet Specific Parameters' section. The general 'Enable Tuning' checkbox does not apply to Prophet itself.")
-    # Force enable_tuning to False for Prophet standalone, as its tuning is handled by specific Prophet parameters.
-    # This ensures that effective_tuning_iterations becomes 0 for Prophet, and no tuning is attempted via get_ml_model.
-    enable_tuning = False
-# For Hybrid models, 'enable_tuning' (from the checkbox) is preserved.
-# If checked, it will be passed to predict_hybrid to tune the ML residual component.
-# If not checked, predict_hybrid will use its default ML parameters.
-
-# Prophet Specific Parameters - Initialize with defaults
-prophet_seasonality_mode = 'additive'
-prophet_changepoint_prior_scale = 0.05
-prophet_seasonality_prior_scale = 10.0
-prophet_daily_seasonality = True
-prophet_weekly_seasonality = True
-prophet_yearly_seasonality = True
-
-if "Prophet" in model_option:
-    st.sidebar.subheader("Prophet Specific Parameters")
-    prophet_seasonality_mode = st.sidebar.selectbox(
-        "Seasonality Mode", options=['additive', 'multiplicative'], index=['additive', 'multiplicative'].index(prophet_seasonality_mode),
-        help="Prophet seasonality mode ('additive' or 'multiplicative')."
-    )
-    prophet_changepoint_prior_scale = st.sidebar.number_input(
-        "Changepoint Prior Scale", min_value=0.001, max_value=0.5, value=prophet_changepoint_prior_scale, step=0.001, format="%.3f",
-        help="Flexibility of automatic changepoint detection. Higher values make trend more flexible."
-    )
-    prophet_seasonality_prior_scale = st.sidebar.number_input(
-        "Seasonality Prior Scale", min_value=0.01, max_value=20.0, value=prophet_seasonality_prior_scale, step=0.01, format="%.2f",
-        help="Strength of the seasonality model. Higher values allow seasonality to fit larger fluctuations."
-    )
-    prophet_daily_seasonality = st.sidebar.checkbox("Enable Daily Seasonality", value=prophet_daily_seasonality)
-    prophet_weekly_seasonality = st.sidebar.checkbox("Enable Weekly Seasonality", value=prophet_weekly_seasonality)
-    prophet_yearly_seasonality = st.sidebar.checkbox("Enable Yearly Seasonality", value=prophet_yearly_seasonality)
-
-# New Hyperparameter controls for Hybrid models
-hybrid_ml_iterations = 1000
-hybrid_ml_learning_rate = 0.5
-hybrid_ml_residual_contribution = 0.8
-
-if "Hybrid" in model_option:
-    st.sidebar.subheader("Hybrid Model Parameters (ML Residual Component)")
-    hybrid_ml_iterations = st.sidebar.slider(
-        "ML Iterations (Number of Trees)", 100, 1500, 500, 50,
-        help="Number of boosting iterations (trees) for the ML model predicting residuals."
-    )
-    hybrid_ml_learning_rate = st.sidebar.slider(
-        "ML Learning Rate", 0.01, 0.2, 0.05, 0.01, format="%.2f",
-        help="Step size shrinkage for the ML model predicting residuals."
-    )
-    hybrid_ml_residual_contribution = st.sidebar.slider(
-        "ML Residual Contribution", 0.0, 1.0, 1.0, 0.05, format="%.2f",
-        help="Weight (0.0 to 1.0) of the ML residual prediction. 0.0 means only Prophet is used, 1.0 means full residual."
-    )
-
+if model_option in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] and enable_tuning:
+    st.sidebar.warning("Hyperparameter tuning is not available for Prophet or Hybrid models via this interface.")
+    enable_tuning = False # Disable tuning for non-tree models
 
 # File uploader widget
 uploaded_file = st.file_uploader("Upload your ED Excel File", type=["xlsx"])
@@ -1007,83 +916,42 @@ if uploaded_file:
                             days=forecast_days
                         )
 
-                        avg_mae = np.nan # Initialize MAE for all models
+                        avg_rmse = np.nan # Initialize RMSE for all models
 
                         # --- Model-specific forecasting logic ---
                         if model_option == "Prophet":
                             # Prophet handles its own feature engineering and iterative prediction
                             if target_col_name == 'Capacity':
                                 st.warning("Prophet model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
-                            forecast_results = predict_prophet(
-                                hospital_data, future_df_base, target_col_name,
-                                seasonality_mode=prophet_seasonality_mode,
-                                changepoint_prior_scale=prophet_changepoint_prior_scale,
-                                seasonality_prior_scale=prophet_seasonality_prior_scale,
-                                daily_seasonality=prophet_daily_seasonality,
-                                weekly_seasonality=prophet_weekly_seasonality,
-                                yearly_seasonality=prophet_yearly_seasonality
-                            )
-                            # Calculate MAE for Prophet on historical data for display
+                            forecast_results = predict_prophet(hospital_data, future_df_base, target_col_name)
+                            # Calculate RMSE for Prophet on historical data for display
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
-                            m_eval = Prophet(
-                                daily_seasonality=prophet_daily_seasonality,
-                                weekly_seasonality=prophet_weekly_seasonality,
-                                yearly_seasonality=prophet_yearly_seasonality,
-                                seasonality_mode=prophet_seasonality_mode,
-                                changepoint_prior_scale=prophet_changepoint_prior_scale,
-                                seasonality_prior_scale=prophet_seasonality_prior_scale,
-                                interval_width=0.95
-                            )
+                            m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
                             m_eval.add_country_holidays(country_name='IE')
                             m_eval.fit(df_prophet_eval)
                             historical_prophet_preds = m_eval.predict(df_prophet_eval[['ds']])['yhat'].values
                             historical_prophet_preds = np.maximum(0, historical_prophet_preds).round(0)
-                            avg_mae = mean_absolute_error(hospital_data[target_col_name].values, historical_prophet_preds)
-                            st.info(f"Prophet's training MAE for {target_col_name}: {avg_mae:.2f} (on historical data)")
+                            avg_rmse = np.sqrt(mean_squared_error(hospital_data[target_col_name].values, historical_prophet_preds))
+                            st.info(f"Prophet's training RMSE for {target_col_name}: {avg_rmse:.2f} (on historical data)")
                             
                         elif model_option in ["Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"]:
                             # Hybrid model
                             if target_col_name == 'Capacity':
-                                st.warning("Hybrid model still being worked on by Dave")
+                                st.warning("Hybrid model may not be ideal for Capacity forecasting if it's static or fixed. It's designed for time-varying data.")
                             
                             residual_model = 'LightGBM' if model_option == "Prophet-LightGBM Hybrid" else 'CatBoost'
                             
-                            forecast_results = predict_hybrid(
-                                hospital_data, 
-                                future_df_base,
-                                base_features,
-                                target_col_name,
-                                residual_model_name=residual_model,
-                                ml_iterations=hybrid_ml_iterations,
-                                ml_learning_rate=hybrid_ml_learning_rate,
-                                ml_residual_contribution=hybrid_ml_residual_contribution,
-                                prophet_seasonality_mode=prophet_seasonality_mode,
-                                prophet_changepoint_prior_scale=prophet_changepoint_prior_scale,
-                                prophet_seasonality_prior_scale=prophet_seasonality_prior_scale,
-                                prophet_daily_seasonality=prophet_daily_seasonality,
-                                prophet_weekly_seasonality=prophet_weekly_seasonality,
-                                prophet_yearly_seasonality=prophet_yearly_seasonality,
-                                enable_tuning=enable_tuning,
-                                tuning_iterations=effective_tuning_iterations
-                            )
+                            forecast_results = predict_hybrid(hospital_data, future_df_base, base_features, target_col_name, residual_model_name=residual_model)
                             
-                            # Calculate MAE for Hybrid on historical data (Prophet component's MAE)
+                            # Calculate RMSE for Hybrid on historical data (Prophet component's RMSE)
                             df_prophet_eval = hospital_data[['Datetime', target_col_name]].rename(columns={'Datetime': 'ds', target_col_name: 'y'})
-                            m_eval = Prophet(
-                                daily_seasonality=prophet_daily_seasonality,
-                                weekly_seasonality=prophet_weekly_seasonality,
-                                yearly_seasonality=prophet_yearly_seasonality,
-                                seasonality_mode=prophet_seasonality_mode,
-                                changepoint_prior_scale=prophet_changepoint_prior_scale,
-                                seasonality_prior_scale=prophet_seasonality_prior_scale,
-                                interval_width=0.95
-                            )
+                            m_eval = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=True, seasonality_mode='additive', interval_width=0.95)
                             m_eval.add_country_holidays(country_name='IE')
                             m_eval.fit(df_prophet_eval)
                             historical_prophet_preds = m_eval.predict(df_prophet_eval[['ds']])['yhat'].values
                             historical_prophet_preds = np.maximum(0, historical_prophet_preds).round(0)
-                            avg_mae = mean_absolute_error(hospital_data[target_col_name].values, historical_prophet_preds)
-                            st.info(f"Hybrid model's base Prophet training MAE for {target_col_name}: {avg_mae:.2f} (on historical data)")
+                            avg_rmse = np.sqrt(mean_squared_error(hospital_data[target_col_name].values, historical_prophet_preds))
+                            st.info(f"Hybrid model's base Prophet training RMSE for {target_col_name}: {avg_rmse:.2f} (on historical data)")
 
                         else: # Tree-based models (CatBoost, LightGBM, XGBoost, GradientBoosting)
                             # Add lag and rolling features specifically for the current target column
@@ -1106,16 +974,14 @@ if uploaded_file:
                             y = training_data[target_col_name]
 
                             # Initialize and/or tune the selected model
-                            # Pass effective_tuning_iterations to get_ml_model
-                            effective_tuning_iterations = tuning_iterations if enable_tuning else 0
-                            model = get_ml_model(model_option, X, y, enable_tuning, effective_tuning_iterations)
+                            model = get_ml_model(model_option, X, y, enable_tuning, tuning_iterations)
 
                             # --- Time Series Cross-Validation for tree-based models ---
-                            # If tuning was enabled, get_ml_model would have already reported the best CV MAE.
-                            # Otherwise, calculate MAE for the default model.
+                            # If tuning was enabled, get_ml_model would have already reported the best CV RMSE.
+                            # Otherwise, calculate RMSE for the default model.
                             if not enable_tuning and len(X) >= 20:
                                 tscv = TimeSeriesSplit(n_splits=min(5, max(1, len(X) // 10)))
-                                fold_maes = []
+                                fold_rmses = []
                                 for fold_idx, (train_index, test_index) in enumerate(tscv.split(X)):
                                     X_train_fold, X_test_fold = X.iloc[train_index], X.iloc[test_index]
                                     y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
@@ -1124,30 +990,29 @@ if uploaded_file:
                                         fold_model = get_ml_model(model_option, X_train_fold, y_train_fold, False, 0) # No tuning in CV folds
                                         y_pred_fold = fold_model.predict(X_test_fold)
                                         y_pred_fold = np.maximum(0, y_pred_fold).round(0)
-                                        fold_maes.append(mean_absolute_error(y_test_fold, y_pred_fold))
+                                        fold_rmses.append(np.sqrt(mean_squared_error(y_test_fold, y_pred_fold)))
                                     else:
                                         st.warning(f"Skipping fold {fold_idx+1} due to insufficient data for '{target_col_name}' at {hospital}.")
 
-                                if fold_maes:
-                                    avg_mae = np.mean(fold_maes)
-                                    st.info(f"Cross-Validation MAE for {target_col_name}: {avg_mae:.2f} (Avg. over {len(fold_maes)} folds)")
+                                if fold_rmses:
+                                    avg_rmse = np.mean(fold_rmses)
+                                    st.info(f"Cross-Validation RMSE for {target_col_name}: {avg_rmse:.2f} (Avg. over {len(fold_rmses)} folds)")
                                 else:
                                     st.warning(f"Could not perform cross-validation for {target_col_name} due to insufficient data or valid folds.")
-                            elif not enable_tuning and len(X) > 0: # Fallback to training MAE if not enough data for CV
+                            elif not enable_tuning and len(X) > 0: # Fallback to training RMSE if not enough data for CV
                                 y_pred_train = model.predict(X)
                                 y_pred_train = np.maximum(0, y_pred_train).round(0)
-                                avg_mae = mean_absolute_error(y, y_pred_train)
-                                st.info(f"Training MAE for {target_col_name}: {avg_mae:.2f} (Trained on all available data)")
+                                avg_rmse = np.sqrt(mean_squared_error(y, y_pred_train))
+                                st.info(f"Training RMSE for {target_col_name}: {avg_rmse:.2f} (Trained on all available data)")
                             
                             # Generate predictions for future dates using the trained model
                             forecast_results = forecast_with_lags(model, training_data, future_df_base, available_features, target_col_name)
-                            forecast_results['Datetime'] = future_df_base['Datetime'].values
 
 
                         # --- Common display for all models ---
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric(f"{target_col_name} MAE", f"{avg_mae:.2f}" if avg_mae is not np.nan else "N/A")
+                            st.metric(f"{target_col_name} RMSE", f"{avg_rmse:.2f}" if avg_rmse is not np.nan else "N/A")
                         with col2:
                             # For Prophet/Hybrid, training records reflect all data passed to Prophet
                             train_records_display = f"{len(X)}" if model_option not in ["Prophet", "Prophet-LightGBM Hybrid", "Prophet-CatBoost Hybrid"] else f"{len(hospital_data)}"
@@ -1155,9 +1020,6 @@ if uploaded_file:
                         with col3:
                             last_val_display = f"{hospital_data[target_col_name].iloc[-1]:.0f}" if not hospital_data.empty else "N/A"
                             st.metric(f"Last {target_col_name} Value", last_val_display)
-
-                        # Ensure 'Datetime' column is present before plotting
-                        assert 'Datetime' in forecast_results.columns, "INTERNAL ERROR: 'Datetime' column missing in forecast_results before plotting."
 
                         # Create and display the forecast plot
                         # Pass show_intervals=True for all models now that intervals are generated for tree-based too
