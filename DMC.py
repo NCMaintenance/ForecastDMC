@@ -55,14 +55,18 @@ def prepare_data(df):
     This function is cached to speed up re-runs if the input data doesn't change.
     Now includes advanced feature engineering.
     """
+    # Explicitly drop 'DayGAR' if it exists, as it's not used for forecasting
+    if 'DayGAR' in df.columns:
+        df = df.drop(columns=['DayGAR'])
+
     # Rename columns for clarity and consistency
     df = df.rename(columns={
         'Tracker8am': 'ED_8am',
         'Tracker2pm': 'ED_2pm',
         'Tracker8pm': 'ED_8pm',
-        'Time Total_8am': 'Trolley_8am',
-        'Time Total_2pm': 'Trolley_2pm',
-        'Time Total_8pm': 'Trolley_8pm',
+        'TimeTotal_8am': 'Trolley_8am', # Corrected: removed space
+        'TimeTotal_2pm': 'Trolley_2pm', # Corrected: removed space
+        'TimeTotal_8pm': 'Trolley_8pm', # Corrected: removed space
         'AdditionalCapacityOpen Morning': 'Additional_Capacity'
     })
 
@@ -71,8 +75,7 @@ def prepare_data(df):
     df['Additional_Capacity'] = df.groupby(['Hospital', 'Date'])['Additional_Capacity'].transform('first')
     df['Additional_Capacity'] = df['Additional_Capacity'].fillna(0)
 
-    # Define common id_vars for melting. DayGAR is removed as it's not used as a feature
-    # and its future values are not easily predictable for forecasting.
+    # Define common id_vars for melting.
     common_id_vars = ['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity']
 
     # Melt ED counts into a long format
@@ -111,7 +114,7 @@ def prepare_data(df):
     df_merged = pd.merge(
         df_ed,
         df_trolley,
-        on=['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity', 'Time'], # DayGAR removed
+        on=['Hospital Group Name', 'Hospital', 'Date', 'Additional_Capacity', 'Time'],
         how='inner' # Use inner join to ensure only complete records (both ED and Trolley for a given time) are kept
     )
 
