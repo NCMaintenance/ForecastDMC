@@ -936,7 +936,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
                 'colsample_bytree': [0.7, 0.8, 0.9]
             }
         else:
-            base_params['n_estimators'] = min(1000, len(X_train) * 3)
+            base_params['n_estimators'] = min(1500, len(X_train) * 3)
             base_params['learning_rate'] = 0.05
             base_params['max_depth'] = 6
     elif model_name == "GradientBoosting (Scikit-learn)":
