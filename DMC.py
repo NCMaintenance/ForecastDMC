@@ -664,7 +664,7 @@ def predict_hybrid(historical_data, future_df_features, features, target_column,
             subsample=0.7, colsample_bylevel=0.7, l2_leaf_reg=2,
             verbose=False, random_state=42, allow_writing_files=False,
             bagging_temperature=1, od_type='Iter', od_wait=50,
-            loss_function='MAE' # Changed to MAE as requested
+            loss_function='huber' # Changed to MAE as requested
         )
     elif residual_model_name == 'GradientBoostingRegressor': # Added for completeness
         ml_residual_model = GradientBoostingRegressor(
@@ -890,7 +890,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
         model_class = cb.CatBoostRegressor
         base_params = {
             'verbose': False, 'random_state': 42, 'allow_writing_files': False,
-            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'huber'
+            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'MAE'
         }
         if enable_tuning:
             param_grid = {
@@ -954,7 +954,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
         else:
             base_params['n_estimators'] = min(500, len(X_train) * 2)
             base_params['learning_rate'] = 0.05
-            base_params['max_depth'] = 4
+            base_params['max_depth'] = 6
     else:
         st.error(f"Invalid model '{model_name}' selected for tuning. Defaulting to CatBoost.")
         return get_ml_model("CatBoost", X_train, y_train, enable_tuning, tuning_iterations)
