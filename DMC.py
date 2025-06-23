@@ -890,7 +890,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
         model_class = cb.CatBoostRegressor
         base_params = {
             'verbose': False, 'random_state': 42, 'allow_writing_files': False,
-            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'MAE'
+            'bagging_temperature': 1, 'od_type': 'Iter', 'od_wait': 50, 'loss_function': 'huber'
         }
         if enable_tuning:
             param_grid = {
@@ -954,7 +954,7 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
         else:
             base_params['n_estimators'] = min(500, len(X_train) * 2)
             base_params['learning_rate'] = 0.05
-            base_params['max_depth'] = 10
+            base_params['max_depth'] = 4
     else:
         st.error(f"Invalid model '{model_name}' selected for tuning. Defaulting to CatBoost.")
         return get_ml_model("CatBoost", X_train, y_train, enable_tuning, tuning_iterations)
