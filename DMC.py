@@ -227,11 +227,12 @@ def prepare_data(df):
         df_merged['DaysToNextHoliday'] = 0
         df_merged['DaysFromLastHoliday'] = 0
     else:
+        # Corrected the lambda function to use 'x' properly
         df_merged['DaysToNextHoliday'] = df_merged['Datetime'].apply(
-            lambda x: min([(h - x.normalize()).days for h in actual_holidays if h >= x.normalize()], default=365)
+            lambda dt: min([(h - dt.normalize()).days for h in actual_holidays if h >= dt.normalize()], default=365)
         )
         df_merged['DaysFromLastHoliday'] = df_merged['Datetime'].apply(
-            lambda x: min([(x.normalize() - h).days for h in actual_holidays if h <= x.normalize()], default=365)
+            lambda dt: min([(dt.normalize() - h).days for h in actual_holidays if h <= dt.normalize()], default=365)
         )
         # Fill default (e.g. 365) for dates far from any holiday or if list is empty before/after
         df_merged['DaysToNextHoliday'] = df_merged['DaysToNextHoliday'].fillna(365) # If no next holiday found (e.g. at end of list)
@@ -365,7 +366,8 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
 
             if actual_holidays:
                 days_to_next_holiday = min([(h - future_datetime.normalize()).days for h in actual_holidays if h >= future_datetime.normalize()], default=365)
-                days_from_last_holiday = min([(x.normalize() - h).days for h in actual_holidays if h <= x.normalize()], default=365)
+                # Corrected: Use future_datetime.normalize() instead of undefined 'x'
+                days_from_last_holiday = min([(future_datetime.normalize() - h).days for h in actual_holidays if h <= future_datetime.normalize()], default=365)
 
             # Append all calculated features for the current future timestamp
             future_dates.append({
