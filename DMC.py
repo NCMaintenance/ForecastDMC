@@ -341,7 +341,7 @@ def create_future_dates(last_date, hospital, hospital_code, additional_capacity,
 
             if actual_holidays:
                 days_to_next_holiday = min([(h - future_datetime.normalize()).days for h in actual_holidays if h >= future_datetime.normalize()], default=365)
-                days_from_last_holiday = min([(future_datetime.normalize() - h).days for h in actual_holidays if h <= future_datetime.normalize()], default=365)
+                days_from_last_holiday = min([(x.normalize() - h).days for h in actual_holidays if h <= x.normalize()], default=365)
 
             # Append all calculated features for the current future timestamp
             future_dates.append({
