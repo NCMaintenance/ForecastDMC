@@ -952,9 +952,9 @@ def get_ml_model(model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
                 'subsample': [0.7, 0.8, 0.9]
             }
         else:
-            base_params['n_estimators'] = min(350, len(X_train) * 2)
+            base_params['n_estimators'] = min(500, len(X_train) * 2)
             base_params['learning_rate'] = 0.05
-            base_params['max_depth'] = 5
+            base_params['max_depth'] = 10
     else:
         st.error(f"Invalid model '{model_name}' selected for tuning. Defaulting to CatBoost.")
         return get_ml_model("CatBoost", X_train, y_train, enable_tuning, tuning_iterations)
