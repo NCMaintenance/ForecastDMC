@@ -55,20 +55,41 @@ def prepare_data(df):
     This function is cached to speed up re-runs if the input data doesn't change.
     Now includes advanced feature engineering.
     """
+    # Normalize column names: strip whitespace from column names first
+    df.columns = [col.strip() for col in df.columns]
+    
     # Explicitly drop 'DayGAR' if it exists, as it's not used for forecasting
     if 'DayGAR' in df.columns:
         df = df.drop(columns=['DayGAR'])
 
     # Rename columns for clarity and consistency
-    df = df.rename(columns={
+    # Use the exact column names as provided by the user for 'from'
+    rename_mapping = {
         'Tracker8am': 'ED_8am',
         'Tracker2pm': 'ED_2pm',
         'Tracker8pm': 'ED_8pm',
-        'TimeTotal_8am': 'Trolley_8am', # Corrected: removed space
-        'TimeTotal_2pm': 'Trolley_2pm', # Corrected: removed space
-        'TimeTotal_8pm': 'Trolley_8pm', # Corrected: removed space
+        'TimeTotal_8am': 'Trolley_8am',
+        'TimeTotal_2pm': 'Trolley_2pm',
+        'TimeTotal_8pm': 'Trolley_8pm',
         'AdditionalCapacityOpen Morning': 'Additional_Capacity'
-    })
+    }
+
+    # Create a new dictionary for renaming based on what's actually present in df.columns
+    actual_rename_map = {old_name: new_name for old_name, new_name in rename_mapping.items() if old_name in df.columns}
+    
+    # Check if any expected columns are missing *before* renaming
+    missing_before_rename = [col for col in rename_mapping.keys() if col not in df.columns]
+    if missing_before_rename:
+        st.warning(f"The following expected columns were not found in the uploaded file (before renaming): {missing_before_rename}. Please ensure your Excel file has the correct headers.")
+
+    df = df.rename(columns=actual_rename_map)
+
+    # After renaming, verify that the target column names for melting are present
+    required_melt_columns = ['ED_8am', 'ED_2pm', 'ED_8pm', 'Trolley_8am', 'Trolley_2pm', 'Trolley_8pm', 'Additional_Capacity']
+    missing_after_processing = [col for col in required_melt_columns if col not in df.columns]
+    if missing_after_processing:
+        st.error(f"Critical columns still missing after processing and renaming: {missing_after_processing}. Cannot proceed with data transformation. Please verify your Excel file's headers.")
+        raise ValueError("Missing critical columns after data preparation.")
 
     # Fill Additional_Capacity across the day for each hospital and date
     # This assumes Additional_Capacity is constant for a given Hospital and Date.
@@ -527,8 +548,7 @@ def predict_prophet(historical_data, future_df_features, target_column):
         seasonality_mode='additive',
         interval_width=0.95 # Confidence interval width for yhat_lower/yhat_upper
     )
-    # Add Irish holidays to Prophet model
-    m.add_country_holidays(country_name='IE')
+    m.add_country_holidays(country_name='IE') # Add Irish holidays
     m.fit(df_prophet)
 
     future = future_df_features[['Datetime']].rename(columns={'Datetime': 'ds'})
