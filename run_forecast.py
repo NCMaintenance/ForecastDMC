@@ -4,12 +4,11 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import timedelta, datetime
-import requests
-from io import StringIO
 import warnings
 from pandas.tseries.holiday import AbstractHolidayCalendar, Holiday, nearest_workday
 from pandas.tseries.offsets import DateOffset
 from dateutil.rrule import MO
+from sklearn.metrics import mean_absolute_error, r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -23,6 +22,9 @@ def install(package):
 print("Checking dependencies...")
 try:
     import neuralforecast
+    from neuralforecast import NeuralForecast
+    from neuralforecast.models import NBEATSx
+    from neuralforecast.losses.pytorch import MAE
     print("✅ NeuralForecast is installed.")
 except ImportError:
     install("neuralforecast")
@@ -32,6 +34,9 @@ except ImportError:
     except ImportError:
         install("scipy")
     import neuralforecast
+    from neuralforecast import NeuralForecast
+    from neuralforecast.models import NBEATSx
+    from neuralforecast.losses.pytorch import MAE
 
 try:
     import meteostat
@@ -218,7 +223,7 @@ def prepare_nbeats_dataset(file_path, target_hospital, weather_location="Cork"):
 
     # 1. Load Main Data
     df_main = load_and_unpivot_all_data(file_path)
-    if df_main.empty: return
+    if df_main.empty: return None
 
     # 2. Generate "Large Table" of Other Hospitals
     df_cross_features = generate_cross_hospital_table(df_main)
@@ -261,36 +266,89 @@ def prepare_nbeats_dataset(file_path, target_hospital, weather_location="Cork"):
     hols = cal.holidays(start=df_target['Datetime'].min(), end=df_target['Datetime'].max())
     df_target['IsHoliday'] = df_target['Datetime'].dt.normalize().isin(hols).astype(int)
 
-    # 8. Format for NeuralForecast (N-BEATSx)
-    # Requires: unique_id, ds, y
-    # We will output two datasets: one for ED Emissions, one for Trolleys
-
-    # Prepare Regressors List (All numeric columns except target and ID)
-    exclude_cols = ['Hospital', 'Date', 'Time', 'Datetime', 'Date_x', 'DateOnly']
-    numeric_cols = df_target.select_dtypes(include=[np.number]).columns.tolist()
-
-    print("\n--- Final Data Structure ---")
-    print(f"Total Columns: {len(df_target.columns)}")
-    print(f"Sample Weather Vars: {[c for c in df_target.columns if 'Wspd' in c]}")
-    print(f"Sample Hospital Lags: {[c for c in df_target.columns if 'Lag1' in c][:3]} ...")
+    # 8. Clean up for NeuralForecast
+    # NeuralForecast needs 'unique_id', 'ds', 'y'
+    # We will rename accordingly before return in the main execution block
 
     return df_target
 
+def run_training_and_evaluation(df, target_col):
+    """
+    Trains NBEATSx model and calculates MAE and R^2.
+    """
+    print(f"\n--- Training NBEATSx for Target: {target_col} ---")
+
+    # Prepare DataFrame for NeuralForecast
+    nf_df = df.copy()
+    nf_df = nf_df.rename(columns={'Datetime': 'ds', target_col: 'y', 'Hospital': 'unique_id'})
+
+    # Select static and historic exogenous features
+    # All numeric columns except 'y' and 'ds' can be used as features
+    exclude_cols = ['ds', 'y', 'unique_id', 'Date', 'Time', 'Date_x', 'DateOnly']
+    numeric_cols = nf_df.select_dtypes(include=[np.number]).columns.tolist()
+    futr_exog_list = [c for c in numeric_cols if c not in exclude_cols]
+
+    # Split Data (Last 7 days for test)
+    # Assuming 3 observations per day
+    horizon = 7 * 3
+
+    # Instantiate Model
+    # Note: NeuralForecast models expect specific input configs
+    models = [
+        NBEATSx(
+            h=horizon,
+            input_size=horizon * 2,
+            loss=MAE(),
+            scaler_type='standard',
+            max_steps=100, # Kept low for demo speed, increase for production
+            futr_exog_list=futr_exog_list
+        )
+    ]
+
+    nf = NeuralForecast(models=models, freq='H') # Frequency is roughly hourly/sub-daily
+
+    # Cross-validation / Backtesting would be ideal, but simple train/test split for now
+    # We need to manually split if we want to calculate MAE/R2 on a holdout set
+    # NeuralForecast cross_validation returns the forecasts
+
+    print(f"Running Cross-Validation (Horizon={horizon} steps)...")
+    try:
+        cv_df = nf.cross_validation(df=nf_df, n_windows=1)
+    except Exception as e:
+        print(f"❌ Training failed: {e}")
+        return
+
+    # Calculate Metrics
+    y_true = cv_df['y']
+    y_pred = cv_df['NBEATSx']
+
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+
+    print(f"\n📊 Results for {target_col}:")
+    print(f"   MAE: {mae:.4f}")
+    print(f"   R² : {r2:.4f}")
+
+    return cv_df
+
 if __name__ == "__main__":
     # --- Configuration ---
-    FILE_PATH = "hospital_data.xlsx" # Ensure this file exists
+    FILE_PATH = "hospital_data.xlsx"
     TARGET_HOSPITAL = "Cork University Hospital"
     LOCATION = "Cork"
 
-    # Check if file exists (Mock creation if not, for demonstration)
+    # Check if file exists
     if not os.path.exists(FILE_PATH):
         print(f"⚠️ {FILE_PATH} not found. Please place your Excel file in the directory.")
+        # Attempt to list files to help debug what is available
+        print(f"Current directory files: {os.listdir('.')}")
     else:
         final_df = prepare_nbeats_dataset(FILE_PATH, TARGET_HOSPITAL, LOCATION)
 
         if final_df is not None:
-            # Export for inspection
-            out_name = "processed_nbeats_data.csv"
-            final_df.to_csv(out_name, index=False)
-            print(f"\n✅ Success! Processed data saved to {out_name}")
-            print("You can now load this CSV directly into NeuralForecast N-BEATSx.")
+            # We have two targets: 'ED Emissions' and 'Trolleys'
+            # Train and Eval for ED Emissions
+            run_training_and_evaluation(final_df, 'ED Emissions')
+
+            # Train and Eval for Trolleys
+            run_training_and_evaluation(final_df, 'Trolleys')
