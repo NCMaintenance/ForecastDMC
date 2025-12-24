@@ -13,3 +13,6 @@ shap
 numba
 lightgbm
 catboost
+neuralforecast
+meteostat
+scipy
