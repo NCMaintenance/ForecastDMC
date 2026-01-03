@@ -1,13 +1,10 @@
-streamlit
 pandas
 numpy==1.26.4
-lightgbm
-xgboost
-catboost
 scikit-learn
 prophet
-plotly
 meteostat==1.6.5
 openpyxl
-seaborn
 statsmodels
+matplotlib
+python-dateutil
+requests
