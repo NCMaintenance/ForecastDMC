@@ -18,6 +18,7 @@ from io import StringIO
 from statsmodels.tsa.arima.model import ARIMA
 from meteostat import Point, Hourly
 import warnings
+
 warnings.filterwarnings("ignore")
 
 # --- Configuration ---
@@ -51,7 +52,7 @@ def download_and_process_virus_data():
     DATASET_CSV_URL = "https://respiratoryvirus.hpsc.ie/datasets/dbd10a497fd84e44954b858249919997_0.csv"
     print(f"\n--- Downloading virus data from HPSC ---")
     try:
-        response = requests.get(DATASET_CSV_URL, timeout=20)
+        response = requests.get(DATASET_CSV_URL, timeout=10)
         response.raise_for_status()
         print("   ✅ Successfully downloaded the virus data.")
         df = pd.read_csv(StringIO(response.text), usecols=['floor', 'weekly_cases', 'disease'])
@@ -59,21 +60,23 @@ def download_and_process_virus_data():
         df_pivot = df.pivot_table(index='Date', columns='disease', values='weekly_cases', aggfunc='sum', fill_value=0)
         df_pivot.columns = [f"{col.replace(' ', '_')}_weekly_cases" for col in df_pivot.columns]
         df_pivot = df_pivot.reset_index().sort_index()
-        print("   ✅ Virus data processed successfully.")
         return df_pivot
     except Exception as e:
         print(f"   ❌ [FAILURE] processing virus data: {e}")
     return pd.DataFrame()
 
 def get_weather_data_from_meteostat(start_date, end_date, location_name):
-    print(f"   Fetching raw hourly weather data for {location_name}...")
+    print(f"   Fetching raw hourly weather data for {location_name} (from {start_date.date()} to {end_date.date()})...")
     locations_map = { "Cork": Point(51.8979, -8.4706, 25), "Kerry": Point(52.2704, -9.7026, 34) }
     if location_name not in locations_map: return None
     try:
         data = Hourly(locations_map[location_name], start_date, end_date).fetch()
-        if data.empty: return None
+        if data.empty:
+            print("   ⚠️ No weather data found.")
+            return None
         data = data.reset_index().rename(columns={'time': 'Datetime'})
         data['Datetime'] = pd.to_datetime(data['Datetime'])
+        print(f"   ✅ Fetched {len(data)} weather records.")
         return data
     except Exception as e:
         print(f"   ❌ Error fetching raw Meteostat data: {e}")
@@ -127,7 +130,6 @@ def prepare_data_vectorized(df_raw, hospital_name, weather_thresholds):
     times = ['8am', '2pm', '8pm']
     time_map = {'8am': '08:00', '2pm': '14:00', '8pm': '20:00'}
 
-    # Check required columns
     cols = [f'ED_{t}' for t in times] + [f'Trolley_{t}' for t in times]
     missing = [c for c in cols if c not in df.columns]
     if missing:
@@ -150,15 +152,23 @@ def prepare_data_vectorized(df_raw, hospital_name, weather_thresholds):
     df_merged['ED Beds'] = pd.to_numeric(df_merged['ED Beds'], errors='coerce')
     df_merged['Trolleys'] = pd.to_numeric(df_merged['Trolleys'], errors='coerce')
 
+    # --- AUTO-DETECT HOSPITAL ---
+    if hospital_name not in df_merged['Hospital'].unique():
+        print(f"   ⚠️ Hospital '{hospital_name}' not found. Available: {df_merged['Hospital'].unique()}")
+        hospital_name = df_merged['Hospital'].unique()[0]
+        print(f"   ⚠️ Defaulting to '{hospital_name}'")
+
     df_hosp = df_merged[df_merged['Hospital'] == hospital_name].copy()
-    if df_hosp.empty: return pd.DataFrame()
+    if df_hosp.empty:
+        print(f"   ❌ No data for {hospital_name}")
+        return pd.DataFrame(), hospital_name
 
     min_d, max_d = df_hosp['Datetime'].min(), df_hosp['Datetime'].max()
+    print(f"   Data range: {min_d} to {max_d}")
     weather, _ = load_weather_data(hospital_name, min_d, max_d)
     df_hosp = merge_weather_data(df_hosp, weather, hospital_name)
     df_hosp['DateOnly'] = df_hosp['Datetime'].dt.normalize()
 
-    # Daily sums
     daily = df_hosp.groupby(['Hospital', 'DateOnly']).agg({'ED Beds': 'sum', 'Trolleys': 'sum'}).rename(
         columns={'ED Beds': 'Daily_ED_Beds', 'Trolleys': 'Daily_Trolleys'}).reset_index()
     df_hosp = pd.merge(df_hosp, daily, on=['Hospital', 'DateOnly'], how='left')
@@ -174,7 +184,6 @@ def prepare_data_vectorized(df_raw, hospital_name, weather_thresholds):
             for c in daily_w.columns:
                 if c != 'DateOnly': df_hosp[c] = df_hosp[c].ffill().bfill().fillna(0)
 
-    # Features
     dt = df_hosp['Datetime'].dt
     df_hosp['Hour'] = dt.hour
     df_hosp['DayOfWeek'] = dt.dayofweek
@@ -201,7 +210,6 @@ def prepare_data_vectorized(df_raw, hospital_name, weather_thresholds):
 
     df_hosp['Hospital_Code'] = df_hosp['Hospital'].astype('category').cat.codes
 
-    # Weather Features
     req_w = ['temp', 'prcp', 'snow', 'wspd', 'pres', 'rhum', 'wpgt', 'coco']
     if all(c in df_hosp.columns for c in req_w):
         df_hosp = df_hosp.sort_values(['Hospital', 'Datetime'])
@@ -224,19 +232,19 @@ def prepare_data_vectorized(df_raw, hospital_name, weather_thresholds):
         df_hosp['pressure_change'] = g['pres'].diff().fillna(0)
         df_hosp['pressure_drop'] = (df_hosp['pressure_change'] < weather_thresholds['pressure_drop_threshold']).astype(int)
 
-        # Interactions
         df_hosp['rainy_and_cold'] = (df_hosp['is_rainy'] & df_hosp['is_cold']).astype(int)
         df_hosp['hot_and_weekend'] = (df_hosp['is_hot'] & df_hosp['IsWeekend']).astype(int)
 
     num_cols = df_hosp.select_dtypes(include=[np.number]).columns
     df_hosp[num_cols] = df_hosp[num_cols].fillna(0)
-    return df_hosp
+    print("   Data preparation complete.")
+    return df_hosp, hospital_name
 
 def add_lag_features_fast(df, target_column):
     print(f"   Adding lag features for {target_column}...")
     df = df.sort_values(['Hospital', 'Datetime'])
     g = df.groupby('Hospital', sort=False)[target_column]
-    lags = [1, 2, 3, 6, 9, 12, 21, 24] # 3 is 1 day (3 slots), 21 is 1 week (21 slots)
+    lags = [1, 2, 3, 6, 9, 12, 21, 24]
     feats = []
 
     for l in lags:
@@ -257,45 +265,42 @@ def compare_daily_models(df_prepared, hospital, daily_metric, virus_features, fo
     df = df_prepared[df_prepared['Hospital'] == hospital].copy()
     if df.empty: return None
 
-    # Aggregation for daily
     cols = ['y', 'IsHoliday', 'IsMonday', 'IsTuesday', 'IsWednesday', 'IsThursday', 'IsFriday', 'IsSaturday', 'IsSunday', 'IsSummer', 'IsWinter', 'Capacity']
     agg = {c: ('first' if c != 'y' else daily_metric) for c in cols if c != 'y'}
     agg['y'] = (daily_metric, 'first')
 
-    # Add weather/virus means
     extra = [c for c in df.columns if c.startswith('Daily_') or c in virus_features]
     for c in extra: agg[c] = ('mean' if 'Daily_' in c else 'first')
 
+    # Use explicit named aggregation to avoid pandas error
+    # "Must provide 'func' or tuples of '(column, aggfunc)."
+    # We can just iterate the dictionary.
     df_daily = df.groupby('DateOnly').agg(**agg).reset_index().rename(columns={'DateOnly': 'ds'}).sort_values('ds')
 
-    if df_daily['y'].notna().sum() < 30: return None
+    if df_daily['y'].notna().sum() < 30:
+        print(f"   ⚠️ Not enough data ({df_daily['y'].notna().sum()}) for ARIMAX.")
+        return None
 
-    # Exogenous
     exog_cols = [c for c in df_daily.columns if c not in ['ds', 'y']]
     exog_num = df_daily[exog_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
-    # Drop constants
     exog_cols = [c for c in exog_cols if exog_num[c].nunique() > 1]
 
-    # Future
     last_date = df_daily['ds'].max()
     hols = get_holidays(last_date, last_date + timedelta(days=forecast_days))
     future_rows = []
 
-    # Monthly averages for filling future weather
     monthly_avgs = df_daily.groupby(df_daily['ds'].dt.month)[exog_cols].mean().to_dict('index')
 
     for d in range(1, forecast_days + 1):
         fd = last_date + timedelta(days=d)
         row = {'ds': fd, 'IsHoliday': int(fd.normalize() in hols),
                'Capacity': df_daily['Capacity'].iloc[-1]}
-        # Day of week
         dow = fd.dayofweek
         for i, day in enumerate(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']):
             row[f'Is{day}'] = int(dow == i)
         row['IsSummer'] = int(fd.month in [6, 7, 8])
         row['IsWinter'] = int(fd.month in [12, 1, 2])
 
-        # Fill others with monthly avg or last val
         m_avg = monthly_avgs.get(fd.month, {})
         for c in exog_cols:
             if c not in row:
@@ -325,36 +330,17 @@ def get_hourly_features(metric, daily_metric_name, other_metric, other_daily_met
             'pressure_drop', 'rainy_and_cold', 'Hospital_Code', 'Hour_sin', 'Hour_cos', 'IsPeakHour', 'IsLowHour']
     base += virus_features
     lags = [c for c in df_columns if c.startswith(f'Lag_{metric}') or c.startswith(f'Rolling_Mean')]
-    # Include lags of other metric? Maybe just current daily
     lags_other = [c for c in df_columns if c.startswith(f'Lag_{other_metric}')]
     all_f = base + lags + lags_other
     if 'pred_2pm_anchor' in df_columns: all_f.append('pred_2pm_anchor')
     return [f for f in all_f if f in df_columns]
 
 def update_lags(df, target_col, new_val, date, hour, time_slots_per_day=3):
-    # This is a helper to update lags in the dataframe for recursive prediction.
-    # df: the dataframe containing history + future rows
-    # target_col: name of the column being predicted
-    # new_val: the predicted value
-    # date, hour: the timestamp of the prediction
-
-    # Ideally, we find the row index for (date, hour)
     mask = (df['ds'] == pd.to_datetime(f"{date} {hour}:00"))
     if not mask.any(): return df
 
     idx = df.index[mask][0]
     df.at[idx, target_col] = new_val
-
-    # We need to update future lags that depend on this value.
-    # Lags are simple shifts of the target column if sorted by time.
-    # However, 'add_lag_features_fast' computed them statically.
-    # In a recursive loop, we must re-compute or manually push values.
-    # Given the dataframe size, re-computing lags for the whole df or a window is safest but slow.
-    # Optimization: Update specific cells for future rows.
-
-    # Lags used: 1, 2, 3, 6, 9, 12, 21, 24
-    # Lag L for row T depends on value at T-L.
-    # Conversely, Value at T affects Lag L at T+L.
 
     lags = [1, 2, 3, 6, 9, 12, 21, 24]
     for l in lags:
@@ -363,10 +349,6 @@ def update_lags(df, target_col, new_val, date, hour, time_slots_per_day=3):
             col_name = f'Lag_{target_col}_{l}'
             if col_name in df.columns:
                 df.at[target_idx, col_name] = new_val
-
-    # Rolling means are harder to update efficiently cell-by-cell.
-    # We will accept stale rolling means for this iteration to ensure stability/speed,
-    # as Lag 1/2/3/21 are the most critical.
     return df
 
 def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_name, daily_forecast_df,
@@ -382,10 +364,8 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
     future_rows = []
     hols = get_holidays(last_date, last_date + timedelta(days=forecast_days))
 
-    # Features list
     base_feats = get_hourly_features(metric, daily_metric_name, other_metric, other_daily_metric_name, df.columns, virus_features)
 
-    # Monthly stats for filling
     monthly_stats = {}
     for m in range(1, 13):
         d = df_train[df_train['Month'] == m]
@@ -411,7 +391,6 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
                 daily_metric_name: d_val, other_daily_metric_name: od_val,
                 'forecast_day_index': d, 'pred_2pm_anchor': 0
             }
-            # Fill
             m_stats = monthly_stats.get(dt.month, {})
             for c in base_feats:
                 if c not in row:
@@ -423,22 +402,16 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
     future_df = pd.DataFrame(future_rows)
     future_df['prediction'] = np.nan
 
-    # Combined DF for Recursion (History + Future)
-    # We need to append future rows to history so we can update lags dynamically
-    # Ensure columns match
     cols = list(df_train.columns)
     for c in future_df.columns:
         if c not in cols: cols.append(c)
 
-    # Reindex
     df_combined = pd.concat([df_train, future_df]).reset_index(drop=True)
     df_combined = df_combined.sort_values('ds').reset_index(drop=True)
 
-    # --- TRAINING ---
     models = {}
     horizons = {'Day1': [1], 'Day2_4': [2,3,4], 'Day5_7': [5,6,7]}
 
-    # 1. 2pm Models
     print("   Training 2pm Anchor models...")
     for grp in horizons:
         d = df_train[df_train['Hour'] == 14].copy()
@@ -449,15 +422,10 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
         m.fit(X, y)
         models[(14, grp)] = m
 
-    # 2. 8am/8pm Models (Dependent)
     print("   Training 8am/8pm Dependent models...")
-    # Add anchor to training data
     df_anchor = df_train.copy()
-    # Get 2pm vals
     vals_2pm = df_train[df_train['Hour'] == 14][['DateOnly', metric]].rename(columns={metric: 'val_2pm'})
     df_anchor = pd.merge(df_anchor, vals_2pm, on='DateOnly', how='left')
-
-    # Create lagged 2pm for 8am (Previous Day)
     vals_2pm['val_2pm_lag1'] = vals_2pm['val_2pm'].shift(1)
     df_anchor = pd.merge(df_anchor, vals_2pm[['DateOnly', 'val_2pm_lag1']], on='DateOnly', how='left')
 
@@ -478,30 +446,24 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
             m.fit(X, y)
             models[(h, grp)] = m
 
-    # --- HISTORICAL IN-SAMPLE PREDICTIONS (Crucial for Prophet) ---
     print("   Generating in-sample predictions...")
-    # Use Day1 models for historical
     hist_preds = []
-    # 1. Predict 14:00 history
     d14 = df_train[df_train['Hour'] == 14].copy()
     if (14, 'Day1') in models:
         X14 = d14[base_feats].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         d14['gbm_pred'] = models[(14, 'Day1')].predict(X14)
         hist_preds.append(d14)
 
-    # 2. Predict 8/20 history (needs anchor)
     for h in [8, 20]:
         dh = df_anchor[df_anchor['Hour'] == h].copy()
         if (h, 'Day1') in models:
             Xh = dh[anchor_feats].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             dh['gbm_pred'] = models[(h, 'Day1')].predict(Xh)
-            # Must remove temp cols before appending if schemas differ
             dh = dh.drop(columns=['val_2pm', 'val_2pm_lag1'], errors='ignore')
             hist_preds.append(dh)
 
     historical_preds = pd.concat(hist_preds).sort_values('ds')
 
-    # --- RECURSIVE FORECASTING ---
     print("   Running recursive forecast...")
 
     future_start_idx = len(df_train)
@@ -511,25 +473,20 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
         f_date = last_date.date() + timedelta(days=d)
 
         # 1. Predict 14:00
-        # Find row in df_combined
         idx_14 = df_combined[(df_combined['ds'].dt.date == f_date) & (df_combined['Hour'] == 14)].index
         if len(idx_14) > 0:
             idx = idx_14[0]
             row = df_combined.iloc[[idx]]
             X = row[base_feats].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             pred = models[(14, grp)].predict(X)[0]
-
-            # Update prediction and lags
             df_combined = update_lags(df_combined, metric, pred, f_date, 14)
             df_combined.at[idx, 'prediction'] = pred
-
             val_14 = pred
 
-        # 2. Predict 08:00 (Needs Anchor from Prev Day)
+        # 2. Predict 08:00
         idx_8 = df_combined[(df_combined['ds'].dt.date == f_date) & (df_combined['Hour'] == 8)].index
         if len(idx_8) > 0:
             idx = idx_8[0]
-            # Get anchor
             if d == 1:
                 anchor = df_train[df_train['Hour']==14][metric].iloc[-1]
             else:
@@ -537,28 +494,23 @@ def train_and_predict_hourly_gbm_combined(df, hospital, metric, daily_metric_nam
                 anchor = df_combined[(df_combined['ds'].dt.date == prev_date) & (df_combined['Hour'] == 14)]['prediction'].values[0]
 
             df_combined.at[idx, 'pred_2pm_anchor'] = anchor
-
             row = df_combined.iloc[[idx]]
             X = row[anchor_feats].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             pred = models[(8, grp)].predict(X)[0]
-
             df_combined = update_lags(df_combined, metric, pred, f_date, 8)
             df_combined.at[idx, 'prediction'] = pred
 
-        # 3. Predict 20:00 (Needs Anchor from Same Day)
+        # 3. Predict 20:00
         idx_20 = df_combined[(df_combined['ds'].dt.date == f_date) & (df_combined['Hour'] == 20)].index
         if len(idx_20) > 0:
             idx = idx_20[0]
             df_combined.at[idx, 'pred_2pm_anchor'] = val_14
-
             row = df_combined.iloc[[idx]]
             X = row[anchor_feats].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             pred = models[(20, grp)].predict(X)[0]
-
             df_combined = update_lags(df_combined, metric, pred, f_date, 20)
             df_combined.at[idx, 'prediction'] = pred
 
-    # Extract future part
     future_preds = df_combined[df_combined['ds'] > last_date].copy()
 
     return historical_preds, future_preds
@@ -587,7 +539,18 @@ def prophet_stacking_pipeline(file_path, hospital, metric, forecast_days=7, weat
 
         print(f"Reading file: {file_path}")
         df_raw = pd.read_excel(file_path, engine='openpyxl')
-        df = prepare_data_vectorized(df_raw, hospital, weather_thresholds)
+
+        # AUTO-DETECT HOSPITAL NAME
+        print("   Auto-detecting available hospitals...")
+        mapping = {'Tracker8am': 'ED_8am', 'Tracker2pm': 'ED_2pm', 'Tracker8pm': 'ED_8pm'}
+        temp_df = df_raw.rename(columns=mapping)
+        if 'Hospital' in temp_df.columns:
+            available_hospitals = temp_df['Hospital'].unique()
+            if hospital not in available_hospitals:
+                print(f"   ⚠️ Hospital '{hospital}' not in file. Switching to '{available_hospitals[0]}'.")
+                hospital = available_hospitals[0]
+
+        df, final_hospital_name = prepare_data_vectorized(df_raw, hospital, weather_thresholds)
 
         if df.empty: return
 
@@ -599,16 +562,31 @@ def prophet_stacking_pipeline(file_path, hospital, metric, forecast_days=7, weat
         df, _ = add_lag_features_fast(df, "Trolleys")
 
         print(f"\nStep 1/3: Forecasting daily metrics...")
-        current_daily_forecast = compare_daily_models(df, hospital, f"Daily_{current_metric.replace(' ', '_')}", virus_features, forecast_days)
-        other_daily_forecast = compare_daily_models(df, hospital, f"Daily_{other_metric.replace(' ', '_')}", virus_features, forecast_days)
+        # Add fallback for ARIMAX if too little data
+        if len(df) < 30:
+            print("   ⚠️ Data insufficient for daily ARIMAX. Creating dummy daily forecast.")
+            # Dummy daily forecast
+            current_daily_forecast = pd.DataFrame({
+                'DateOnly': pd.date_range(start=df['DateOnly'].max() + timedelta(days=1), periods=forecast_days),
+                f"Daily_{current_metric.replace(' ', '_')}": df[f"Daily_{current_metric.replace(' ', '_')}"].mean()
+            })
+            other_daily_forecast = pd.DataFrame({
+                'DateOnly': pd.date_range(start=df['DateOnly'].max() + timedelta(days=1), periods=forecast_days),
+                f"Daily_{other_metric.replace(' ', '_')}": df[f"Daily_{other_metric.replace(' ', '_')}"].mean()
+            })
+        else:
+            current_daily_forecast = compare_daily_models(df, final_hospital_name, f"Daily_{current_metric.replace(' ', '_')}", virus_features, forecast_days)
+            other_daily_forecast = compare_daily_models(df, final_hospital_name, f"Daily_{other_metric.replace(' ', '_')}", virus_features, forecast_days)
 
-        if current_daily_forecast is None: return
+        if current_daily_forecast is None:
+            print("   ❌ Failed to generate daily forecast.")
+            return
 
         df['ds'] = df['Datetime']
         print(f"\nStep 2/3: Training hourly GBM models...")
 
         hist_preds, fut_preds = train_and_predict_hourly_gbm_combined(
-            df.copy(), hospital, current_metric, f"Daily_{current_metric.replace(' ', '_')}", current_daily_forecast,
+            df.copy(), final_hospital_name, current_metric, f"Daily_{current_metric.replace(' ', '_')}", current_daily_forecast,
             other_metric, f"Daily_{other_metric.replace(' ', '_')}", other_daily_forecast, virus_features, forecast_days
         )
 
@@ -624,6 +602,14 @@ def prophet_stacking_pipeline(file_path, hospital, metric, forecast_days=7, weat
         p_train = hist_preds[['ds', current_metric, 'gbm_pred', 'Hour'] + virus_features].rename(columns={current_metric: 'y'}).dropna()
         m.fit(p_train)
 
+        # In-Sample Fit MAE
+        in_sample = m.predict(p_train)
+        y_true = p_train['y'].values
+        y_pred = in_sample['yhat'].values
+        mae = mean_absolute_error(y_true, y_pred)
+        print(f"\n--- 📊 MODEL PERFORMANCE (In-Sample) ---")
+        print(f"MAE: {mae:.2f}")
+
         fut_for_p = fut_preds.rename(columns={'prediction': 'gbm_pred'})
         combined = pd.concat([hist_preds[['ds', 'gbm_pred', 'Hour'] + virus_features],
                               fut_for_p[['ds', 'gbm_pred', 'Hour'] + virus_features]], ignore_index=True)
@@ -631,7 +617,7 @@ def prophet_stacking_pipeline(file_path, hospital, metric, forecast_days=7, weat
         forecast = m.predict(combined)
 
         print("\n--- ✅ FINAL FORECAST COMPLETE ---")
-        output_file = f"forecast_{hospital.replace(' ', '_')}_{metric.replace(' ', '_')}.csv"
+        output_file = f"forecast_{final_hospital_name.replace(' ', '_')}_{metric.replace(' ', '_')}.csv"
         cols = ['ds', 'yhat', 'yhat_lower', 'yhat_upper']
         forecast[cols].tail(forecast_days * 3).to_csv(output_file, index=False)
         print(f"Forecast saved to {output_file}")
