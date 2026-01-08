@@ -16,7 +16,13 @@ import plotly.graph_objects as go
 import requests
 from io import StringIO
 import warnings
-from meteostat import Point, Hourly
+
+# Try to import meteostat, but handle the error if it's missing (common on Streamlit Cloud)
+try:
+    from meteostat import Point, Hourly
+    METEOSTAT_AVAILABLE = True
+except ImportError:
+    METEOSTAT_AVAILABLE = False
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -62,6 +68,10 @@ def download_and_process_virus_data():
 @st.cache_data(ttl=24*3600)
 def get_weather_data(start_date, end_date, location_name="Cork"):
     """Fetches hourly weather data using Meteostat."""
+    if not METEOSTAT_AVAILABLE:
+        # Return None so the app falls back to dummy weather columns
+        return None
+
     # Coordinates
     loc_map = {
         "Cork": Point(51.8979, -8.4706, 25),
