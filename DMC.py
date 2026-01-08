@@ -348,25 +348,27 @@ def compare_daily_models(df, daily_metric, virus_features, forecast_days=7):
     """Trains ARIMAX for daily totals."""
     if not STATSMODELS_AVAILABLE: return None
     
-    # Aggregation logic
+    # Create 'y' column for aggregation - simplifies dictionary syntax
+    df['y'] = df[daily_metric]
+    
+    # Aggregation logic - using standard pandas syntax {col: func}
     daily_agg_dict = {
-        'y': (daily_metric, 'sum'), 'IsHoliday': ('IsHoliday', 'first'),
-        'IsMonday': ('IsMonday', 'first'), 'IsTuesday': ('IsTuesday', 'first'),
-        'IsWednesday': ('IsWednesday', 'first'), 'IsThursday': ('IsThursday', 'first'),
-        'IsFriday': ('IsFriday', 'first'), 'IsSaturday': ('IsSaturday', 'first'),
-        'IsSunday': ('IsSunday', 'first'), 'IsSummer': ('IsSummer', 'first'),
-        'IsWinter': ('IsWinter', 'first'), 'Capacity': ('Capacity', 'first')
+        'y': 'sum', 
+        'IsHoliday': 'first',
+        'IsMonday': 'first', 'IsTuesday': 'first',
+        'IsWednesday': 'first', 'IsThursday': 'first',
+        'IsFriday': 'first', 'IsSaturday': 'first',
+        'IsSunday': 'first', 'IsSummer': 'first',
+        'IsWinter': 'first', 'Capacity': 'first'
     }
     
     # Add Weather/Virus means
     extra_cols = virus_features + [c for c in df.columns if 'Daily_' in c or c in ['temp', 'prcp']]
     for c in extra_cols:
-        if c in df.columns: daily_agg_dict[c] = (c, 'mean')
+        if c in df.columns: daily_agg_dict[c] = 'mean'
     
     # Map raw metric name to 'y'
     df['DateOnly'] = df['Datetime'].dt.normalize()
-    # Note: df already has values, we need to map the passed metric to a generic name or use it directly
-    # Ideally, we pass the raw DF and aggregate
     
     # Perform Aggregation
     df_daily = df.groupby('DateOnly').agg(daily_agg_dict).reset_index().rename(columns={'DateOnly': 'ds'}).sort_values('ds')
